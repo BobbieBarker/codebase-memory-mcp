@@ -29,10 +29,30 @@ it('offers the Galaxy workspace and reports the selected task', async () => {
         workspace: 'explore', onWorkspaceChange,
     }} />));
     const tabs = [...host.querySelectorAll<HTMLButtonElement>('[data-workspace-tab]')];
-    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Architecture', 'Agents', 'Coverage', 'System']);
+    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Architecture', 'ADR', 'Coverage', 'System']);
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
     await act(async () => tabs[1].click());
     expect(onWorkspaceChange).toHaveBeenCalledWith('galaxy');
+});
+
+it.each([false, true])('navigates across only available workspaces with experimental Agents %s', async experimentalAgents => {
+    const onWorkspaceChange = vi.fn();
+    await act(async () => root.render(<AtlasChrome {...makeProps()} workspace="architecture"
+        experimentalAgents={experimentalAgents} onWorkspaceChange={onWorkspaceChange} />));
+    expect(host.querySelector('[data-workspace-tab="agents"]') !== null).toBe(experimentalAgents);
+    const adr = host.querySelector('[data-workspace-tab="adr"]')!;
+    await act(async () => adr.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })));
+    expect(onWorkspaceChange).toHaveBeenCalledWith(experimentalAgents ? 'agents' : 'coverage');
+    expect(document.activeElement?.getAttribute('data-workspace-tab')).toBe(experimentalAgents ? 'agents' : 'coverage');
+});
+
+it('opens the project ADR from the main navigation', async () => {
+    const onWorkspaceChange = vi.fn();
+    await act(async () => root.render(<AtlasChrome {...makeProps()} workspace="adr" onWorkspaceChange={onWorkspaceChange} />));
+    const adr = host.querySelector<HTMLButtonElement>('[data-workspace-tab="adr"]')!;
+    expect(adr.getAttribute('aria-selected')).toBe('true');
+    await act(async () => adr.click());
+    expect(onWorkspaceChange).toHaveBeenCalledWith('adr');
 });
 
 it('keeps one galaxy mounted and visible alongside chat in its own workspace', async () => {
@@ -121,7 +141,7 @@ it('hides selected-code context outside Explore without losing its state', async
     const inspector = <input aria-label="Pinned code context" defaultValue="keep context" />;
     await act(async () => root.render(<AtlasChrome {...props} selectionInspector={inspector} chatOpen workspace="explore" />));
     const panel = host.querySelector('[aria-label="Pinned code context"]');
-    for (const workspace of ['galaxy', 'architecture', 'agents', 'coverage', 'system'] as const) {
+    for (const workspace of ['galaxy', 'architecture', 'adr', 'agents', 'coverage', 'system'] as const) {
         await act(async () => root.render(<AtlasChrome {...props} selectionInspector={inspector} chatOpen workspace={workspace} />));
         expect(host.querySelector('[aria-label="Pinned code context"]')).toBe(panel);
         expect(panel?.closest('[hidden]')).not.toBeNull();
@@ -150,11 +170,14 @@ it('replaces legacy model and twin controls when selected-code context is suppli
 it('opens search on demand, retains its query, and returns keyboard focus on Escape', async () => {
     const props = { ...makeProps(), commandValue: 'index', onCommandKeyDown: vi.fn() };
     await act(async () => root.render(<AtlasChrome {...props} />));
-    const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Open search and commands"]');
+    const trigger = host.querySelector<HTMLInputElement>('[aria-label="Preserved reader"]');
     expect(trigger).not.toBeNull();
     const dialog = host.querySelector<HTMLDialogElement>('dialog');
     expect(dialog?.open).toBe(false);
-    await act(async () => { trigger!.focus(); trigger!.click(); });
+    await act(async () => {
+        trigger!.focus();
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    });
     expect(dialog?.open).toBe(true);
     const input = host.querySelector<HTMLInputElement>('[data-testid="atlas-command-input"]')!;
     expect(document.activeElement).toBe(input);
@@ -206,6 +229,21 @@ it('keeps tools and explanation-depth controls out of the header', async () => {
     const header = host.querySelector('[data-testid="atlas-header"]')!;
     expect(header.querySelector('.atlas-tools-menu')).toBeNull();
     expect(header.querySelector('[aria-label="Explanation depth"]')).toBeNull();
+    expect(header.querySelector('.atlas-search-action')).toBeNull();
+    expect([...header.querySelectorAll('button')].some(button => button.textContent === 'Edges')).toBe(false);
+});
+
+it('places Chat directly after the project selector and keeps its toggle wired', async () => {
+    const onOpenBrowserAi = vi.fn();
+    await act(async () => root.render(<AtlasChrome {...makeProps()} workspace="adr"
+        projectSwitcher={<div data-testid="project-selector">Project</div>}
+        onOpenBrowserAi={onOpenBrowserAi} chatOpen />));
+    const project = host.querySelector('[data-testid="project-selector"]')!;
+    const chat = project.nextElementSibling as HTMLButtonElement;
+    expect(chat.textContent).toBe('Chat');
+    expect(chat.getAttribute('aria-expanded')).toBe('true');
+    await act(async () => chat.click());
+    expect(onOpenBrowserAi).toHaveBeenCalledOnce();
 });
 
 it('keeps pending results visible until activation succeeds and refocuses an open search', async () => {

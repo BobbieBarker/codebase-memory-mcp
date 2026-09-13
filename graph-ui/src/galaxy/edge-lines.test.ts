@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { createEdgeGeometry, EDGE_INTENSITY_FOCUS, edgeIntensityFor } from './EdgeLines';
+import { createEdgeGeometry, EDGE_INTENSITY_FOCUS, EDGE_INTENSITY_MUTED, edgeIntensityFor } from './EdgeLines';
+import { edgeIntensityScale } from './density';
 import { edgeColor } from '../graph/edge-style';
 import type { GraphNode } from './types';
 
@@ -73,6 +74,55 @@ describe('Galaxy edge geometry', () => {
         const flow = geometry.getAttribute('edgeFlow');
         expect([flow.getX(0), flow.getX(1)]).toEqual([0, 1]);
         geometry.dispose();
+    });
+
+    it('emphasizes incoming and outgoing selection edges without expanding the selected roots', () => {
+        const nodes = [node(1), node(2), node(3), node(4)];
+        const edges = [
+            { source: 1, target: 2, type: 'CALLS' },
+            { source: 3, target: 1, type: 'IMPORTS' },
+            { source: 2, target: 3, type: 'CALLS' },
+            { source: 1, target: 4, type: 'CONTAINS' },
+        ];
+        const highlightedIds = new Set([1, 4]);
+        const normal = createEdgeGeometry({ nodes, edges, highlightedIds });
+        const focused = createEdgeGeometry({ nodes, edges, highlightedIds, emphasizeIncidentEdges: true });
+        const expectedPositions = [1, 0, 0, 2, 0, 0, 3, 0, 0, 1, 0, 0, 1, 0, 0, 4, 0, 0];
+        expect(Array.from(normal.getAttribute('position').array)).toEqual(expectedPositions);
+        expect(Array.from(focused.getAttribute('position').array)).toEqual(expectedPositions);
+        expect(Array.from(highlightedIds)).toEqual([1, 4]);
+        expect(Array.from(focused.getAttribute('edgeFlow').array))
+            .toEqual(Array.from(normal.getAttribute('edgeFlow').array));
+
+        for (const [index, type] of ['CALLS', 'IMPORTS', 'CONTAINS'].entries()) {
+            const color = new THREE.Color(edgeColor(type));
+            const normalIntensity = index === 2 ? EDGE_INTENSITY_FOCUS : EDGE_INTENSITY_MUTED * edgeIntensityScale(edges.length);
+            for (const [geometry, intensity] of [[normal, normalIntensity], [focused, EDGE_INTENSITY_FOCUS]] as const) {
+                const rendered = geometry.getAttribute('color');
+                for (const vertex of [index * 2, index * 2 + 1]) {
+                    expect(rendered.getX(vertex)).toBeCloseTo(color.r * intensity, 6);
+                    expect(rendered.getY(vertex)).toBeCloseTo(color.g * intensity, 6);
+                    expect(rendered.getZ(vertex)).toBeCloseTo(color.b * intensity, 6);
+                }
+            }
+        }
+        normal.dispose();
+        focused.dispose();
+    });
+
+    it('leaves the overall graph unchanged when incident emphasis has no selected roots', () => {
+        const nodes = [node(1), node(2), node(3)];
+        const edges = [{ source: 1, target: 2, type: 'CALLS' }, { source: 2, target: 3, type: 'IMPORTS' }];
+        for (const highlightedIds of [null, new Set<number>()]) {
+            const normal = createEdgeGeometry({ nodes, edges, highlightedIds });
+            const focused = createEdgeGeometry({ nodes, edges, highlightedIds, emphasizeIncidentEdges: true });
+            for (const attribute of ['position', 'color', 'edgeFlow']) {
+                expect(Array.from(focused.getAttribute(attribute).array))
+                    .toEqual(Array.from(normal.getAttribute(attribute).array));
+            }
+            normal.dispose();
+            focused.dispose();
+        }
     });
 
     it('retains the shared relationship hue under density scaling and focus', () => {

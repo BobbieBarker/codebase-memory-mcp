@@ -81,6 +81,8 @@ export interface ProjectsPanelProps {
     /** Called with a project name when the reader wants to open it here. */
     onOpenProject: (name: string) => void;
     onClose: () => void;
+    /** Opens the dedicated project decision record when hosted in the workspace. */
+    onOpenAdr?: () => void;
     /** The polling interval, so a test does not have to wait a second and a half. */
     pollMs?: number;
 }
@@ -281,8 +283,8 @@ export default function ProjectsPanel(props: ProjectsPanelProps): JSX.Element {
     }, [loadProjects, loadJobs, loadServer]);
 
     useEffect(() => {
-        void loadAdr();
-    }, [loadAdr]);
+        if (!props.onOpenAdr) void loadAdr();
+    }, [loadAdr, props.onOpenAdr]);
 
     // The poll runs only while a job runs: an idle panel sends nothing.
     useEffect(() => {
@@ -729,7 +731,9 @@ export default function ProjectsPanel(props: ProjectsPanelProps): JSX.Element {
                 {project.length === 0 && (
                     <p className="atlas-projects-text" data-testid="atlas-projects-adr-none">{text.adrNoProject}</p>
                 )}
-                {project.length > 0 && (
+                {project.length > 0 && props.onOpenAdr && <button type="button" className="atlas-projects-action"
+                    onClick={props.onOpenAdr}>Open ADR</button>}
+                {project.length > 0 && !props.onOpenAdr && (
                     <>
                         <p className="atlas-projects-text">{text.adrIntro(project)}</p>
                         {adr.state === 'loading' && <p className="atlas-projects-note">{text.adrLoading}</p>}

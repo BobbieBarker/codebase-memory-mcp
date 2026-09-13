@@ -9,7 +9,8 @@ interface ProjectSwitcherProps {
     currentProject: string;
     listProjects: () => Promise<readonly ProjectEntry[]>;
     onSelectProject: (name: string) => void;
-    onManageProjects: () => void;
+    onAddProject: () => void;
+    indexActivity?: { name: string; status: 'indexing' | 'done' | 'error' };
 }
 
 export default function ProjectSwitcher(props: ProjectSwitcherProps): JSX.Element {
@@ -120,8 +121,12 @@ export default function ProjectSwitcher(props: ProjectSwitcherProps): JSX.Elemen
                     </button>
                 </li>)}</ul>}
             </div>
+            {props.indexActivity && <button type="button" className="atlas-project-index-activity"
+                onClick={() => { close(true); props.onAddProject(); }}>
+                <span>{text.indexActivity(props.indexActivity.status)}</span><span>{props.indexActivity.name}</span>
+            </button>}
             <footer>
-                <button type="button" onClick={() => { close(); props.onManageProjects(); }}>{text.manage}</button>
+                <button type="button" onClick={() => { close(true); props.onAddProject(); }}>{text.add}</button>
                 <button type="button" disabled={status === 'loading'} onClick={() => setRevision(value => value + 1)}>{text.refresh}</button>
             </footer>
         </div>}

@@ -20,7 +20,7 @@ it('keeps the overall graph after clearing while the code caret stays put, and f
     const props: GalaxyPanelProps = { project: 'sample', visible: true, onOpenNode: vi.fn(), onClearSelection: clear,
         fetch: fetchLayout, focusQualifiedName: 'sample.node1', focusFilePath: 'src/file1.ts', focusSourceRange: { startLine: 1, endLine: 1 } };
     await act(async () => root.render(<GalaxyPanel {...props} />));
-    expect(globalThis.__atlasGalaxy?.highlightedCount).toBe(2);
+    expect(globalThis.__atlasGalaxy?.highlightedCount).toBe(1);
     const fits = globalThis.__atlasGalaxy!.fits;
     const background = [...host.querySelectorAll('button')].find(button => button.textContent === 'Empty canvas')!;
     await act(async () => background.click());
@@ -32,5 +32,5 @@ it('keeps the overall graph after clearing while the code caret stays put, and f
     expect(globalThis.__atlasGalaxy?.highlightedCount).toBe(0);
     await act(async () => root.render(<GalaxyPanel {...props} focusQualifiedName="sample.node3" focusFilePath="src/file3.ts" />));
     expect(globalThis.__atlasGalaxy?.highlightedCount).toBe(1);
-    expect(globalThis.__atlasGalaxy?.lastTargetQn).toBe('sample.node3');
+    expect(globalThis.__atlasGalaxy?.lastTargetQn).toBe('src/file3.ts');
 });

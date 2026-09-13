@@ -660,6 +660,7 @@ interface GraphSceneProps {
     onShadowNodeClick?: (node: CoverageShadowNode) => void;
     renderShadowTooltip?: (node: CoverageShadowNode) => ReactNode;
     highlightedIds: Set<number> | null;
+    emphasizeIncidentEdges?: boolean;
     cameraTarget: CameraTarget | null;
     showLabels: boolean;
     display?: DisplaySettings;
@@ -710,6 +711,7 @@ export function GraphScene({
     onShadowNodeClick,
     renderShadowTooltip,
     highlightedIds,
+    emphasizeIncidentEdges = false,
     cameraTarget,
     showLabels,
     display = DEFAULT_DISPLAY_SETTINGS,
@@ -848,6 +850,7 @@ export function GraphScene({
                     nodes={data.nodes}
                     edges={data.edges}
                     highlightedIds={highlightedIds}
+                    emphasizeIncidentEdges={emphasizeIncidentEdges}
                     brightness={display.edgeBrightness}
                 />
             )}

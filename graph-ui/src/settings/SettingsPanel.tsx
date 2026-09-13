@@ -66,6 +66,7 @@ import {
     isDefaultDisplay,
 } from '../galaxy/density';
 import type { EdgeDensity, GraphDisplaySettings, GraphProjection } from '../galaxy/density';
+import { experimentalAgentsEnabled } from '../app/feature-flags';
 import { humanBytes } from '../llm/sidecar';
 import type { CacheModel, SidecarFacts, SidecarState } from '../llm/sidecar';
 import { LLM_START_COMMAND } from '../llm/strings';
@@ -144,6 +145,7 @@ export interface SettingsPanelProps {
     onRefresh?: (() => void) | undefined;
     /** Die Einstellungen der Darstellung. */
     display: GraphDisplaySettings;
+    experimentalAgents?: boolean;
     onDisplay: (next: GraphDisplaySettings) => void;
     /** Eine fertige Messung nach oben melden, damit die Naht sie traegt. */
     onMeasurement?: ((measurement: SettingsMeasurement) => void) | undefined;
@@ -994,7 +996,7 @@ export default function SettingsPanel(props: SettingsPanelProps): JSX.Element {
                   * Im Instrument selbst bleibt nur, was den laufenden Blick
                   * steuert (follow, trails, cinema).
                   */}
-                <Choice<boolean>
+                {(props.experimentalAgents ?? experimentalAgentsEnabled) && <><Choice<boolean>
                     kind="effect"
                     name="agents"
                     label={text.settingAgents}
@@ -1080,7 +1082,7 @@ export default function SettingsPanel(props: SettingsPanelProps): JSX.Element {
                         change('agentTimeline', { ...props.display, agentTimeline: value })}
                 >
                     {measure('agentTimeline')}
-                </Choice>
+                </Choice></>}
 
                 <div
                     className="atlas-settings-profiles"

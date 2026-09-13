@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react';
 import type { JSX } from 'react';
 import type { Workspace } from './workspace-strings';
-import { workspaceStrings as s } from './workspace-strings';
+import { availableWorkspaces, workspaceStrings as s } from './workspace-strings';
 
 interface Props {
     workspace: Workspace;
+    experimentalAgents?: boolean;
     onWorkspace: (workspace: Workspace) => void;
     onContinue: () => void; onLocalAi: () => void;
 }
@@ -28,7 +29,7 @@ export default function WelcomePanel(props: Props): JSX.Element {
             <p className="cbm-welcome-eyebrow">{s.welcomeEyebrow}</p>
             <h2 id="cbm-welcome-title">{s.welcomeTitle}</h2><p>{s.welcomeDescription}</p>
             <div className="cbm-welcome-choices" role="group" aria-label={s.navigation}>
-                {s.workspaces.map((item) => <button type="button" key={item.id}
+                {availableWorkspaces(props.experimentalAgents).map((item) => <button type="button" key={item.id}
                     aria-pressed={props.workspace === item.id} onClick={() => props.onWorkspace(item.id)}>
                     <strong>{item.label}</strong><span>{s.descriptions[item.id]}</span>
                 </button>)}

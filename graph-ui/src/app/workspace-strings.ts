@@ -1,4 +1,6 @@
-export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'agents' | 'coverage' | 'system';
+import { experimentalAgentsEnabled } from './feature-flags';
+
+export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'adr' | 'agents' | 'coverage' | 'system';
 export type Guidance = 'brief' | 'explained';
 
 export const workspaceStrings = {
@@ -7,6 +9,7 @@ export const workspaceStrings = {
         { id: 'explore' as const, label: 'Explore' },
         { id: 'galaxy' as const, label: 'Galaxy' },
         { id: 'architecture' as const, label: 'Architecture' },
+        { id: 'adr' as const, label: 'ADR' },
         { id: 'agents' as const, label: 'Agents' },
         { id: 'coverage' as const, label: 'Coverage' },
         { id: 'system' as const, label: 'System' },
@@ -32,11 +35,12 @@ export const workspaceStrings = {
     perspective: 'Reading preferences',
     welcomeEyebrow: 'Codebase memory',
     welcomeTitle: 'A clearer view of your code.',
-    welcomeDescription: 'Explore the source, understand its architecture, and follow your agents.',
+    welcomeDescription: 'Explore the source and understand its architecture.',
     descriptions: {
         explore: 'Read source with graph context.',
         galaxy: 'Explore the whole graph and its coverage shadow.',
         architecture: 'See modules, dependencies, and entry points.',
+        adr: 'Read and edit the project’s architecture decisions.',
         agents: 'Inspect recorded activity and touched code.',
         coverage: 'Inspect indexed paths, exclusions, and parser gaps.',
         system: 'Monitor the daemon, indexes, and logs.',
@@ -60,3 +64,17 @@ export const workspaceStrings = {
     start: 'Start exploring',
     aiOptional: 'Browser AI is optional and off. Setup asks before downloading a model.',
 };
+
+export function availableWorkspaces(agentsEnabled = experimentalAgentsEnabled) {
+    return workspaceStrings.workspaces.filter(workspace => agentsEnabled || workspace.id !== 'agents');
+}
+
+export function allowedWorkspace(workspace: Workspace, agentsEnabled = experimentalAgentsEnabled): Workspace {
+    return workspace === 'agents' && !agentsEnabled ? 'explore' : workspace;
+}
+
+/** An unavailable explicit or saved workspace falls back to the source reader. */
+export function initialWorkspace(requested: string | null, saved: string | null, agentsEnabled = experimentalAgentsEnabled): Workspace {
+    const known = (value: string | null): value is Workspace => workspaceStrings.workspaces.some(workspace => workspace.id === value);
+    return allowedWorkspace(known(requested) ? requested : known(saved) ? saved : 'architecture', agentsEnabled);
+}

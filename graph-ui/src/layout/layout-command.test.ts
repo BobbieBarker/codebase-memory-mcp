@@ -22,9 +22,9 @@ describe('die Befehle der Kommandozeile', () => {
     });
 
     it('erkennt die Zeile, die den Live-Modus der Agenten umlegt', () => {
-        expect(lineCommandOf(LIVE_AGENTS_COMMAND)).toBe('toggle-live-agents');
-        expect(lineCommandOf('  Live   Agents ')).toBe('toggle-live-agents');
-        expect(lineCommandOf('LIVE AGENTS')).toBe('toggle-live-agents');
+        expect(lineCommandOf(LIVE_AGENTS_COMMAND, true)).toBe('toggle-live-agents');
+        expect(lineCommandOf('  Live   Agents ', true)).toBe('toggle-live-agents');
+        expect(lineCommandOf('LIVE AGENTS', true)).toBe('toggle-live-agents');
     });
 
     /*

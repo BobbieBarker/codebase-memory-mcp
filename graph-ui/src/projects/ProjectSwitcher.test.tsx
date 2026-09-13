@@ -9,7 +9,7 @@ let container: HTMLDivElement;
 let root: Root;
 const currentProject = 'alpha';
 const onSelectProject = vi.fn();
-const onManageProjects = vi.fn();
+const onAddProject = vi.fn();
 
 beforeEach(() => {
     (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -24,9 +24,9 @@ afterEach(async () => {
     container.remove();
 });
 
-async function render(listProjects: () => Promise<readonly ProjectEntry[]>): Promise<void> {
+async function render(listProjects: () => Promise<readonly ProjectEntry[]>, indexActivity?: { name: string; status: 'indexing' | 'done' | 'error' }): Promise<void> {
     await act(async () => root.render(<ProjectSwitcher currentProject={currentProject}
-        listProjects={listProjects} onSelectProject={onSelectProject} onManageProjects={onManageProjects} />));
+        listProjects={listProjects} onSelectProject={onSelectProject} onAddProject={onAddProject} indexActivity={indexActivity} />));
 }
 
 async function click(element: HTMLElement | null): Promise<void> {
@@ -93,18 +93,20 @@ describe('ProjectSwitcher', () => {
         expect(onSelectProject).not.toHaveBeenCalled();
     });
 
-    it('offers retry and project management when listing fails', async () => {
+    it('offers retry and adding a project when listing fails', async () => {
         const list = vi.fn().mockRejectedValueOnce(new Error('offline'))
             .mockResolvedValueOnce([{ name: 'recovered' }]);
         await render(list);
         await click(container.querySelector('summary'));
         expect(container.textContent).toContain('Could not load projects.');
-        expect(button('Manage projects')).not.toBeNull();
+        expect(button('Add project index')).not.toBeNull();
+        expect(button('Manage projects')).toBeNull();
         await click(button('Try again'));
         expect(button('recovered')).not.toBeNull();
-        await click(button('Manage projects'));
-        expect(onManageProjects).toHaveBeenCalledTimes(1);
+        await click(button('Add project index'));
+        expect(onAddProject).toHaveBeenCalledTimes(1);
         expect(container.querySelector('details')?.open).toBe(false);
+        expect(document.activeElement).toBe(container.querySelector('summary'));
     });
 
     it('distinguishes an empty index from a search with no matches', async () => {
@@ -112,7 +114,7 @@ describe('ProjectSwitcher', () => {
         await render(list);
         await click(container.querySelector('summary'));
         expect(container.textContent).toContain('No indexed projects yet.');
-        expect(button('Manage projects')).not.toBeNull();
+        expect(button('Add project index')).not.toBeNull();
         await click(button('Refresh projects'));
         await filter('missing');
         expect(container.textContent).toContain('No matching projects.');
@@ -130,5 +132,15 @@ describe('ProjectSwitcher', () => {
         await act(async () => resolveOld([{ name: 'obsolete-source' }]));
         expect(button('obsolete-source')).toBeNull();
         expect(button('current-source')).not.toBeNull();
+    });
+
+    it('reopens indexing progress without switching the active project', async () => {
+        await render(async () => [{ name: currentProject }], { name: 'new-repo', status: 'indexing' });
+        await click(container.querySelector('summary'));
+        expect(button('Indexing…')?.textContent).toContain('new-repo');
+        await click(button('Indexing…'));
+        expect(onAddProject).toHaveBeenCalledOnce();
+        expect(onSelectProject).not.toHaveBeenCalled();
+        expect(container.querySelector('details')?.open).toBe(false);
     });
 });

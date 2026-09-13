@@ -123,7 +123,7 @@ export default function SystemWorkspace({ api, onOpenProjects, active = true, ve
 
         <div id="system-panel-indexes" role="tabpanel" aria-labelledby="system-tab-indexes" hidden={tab !== 'indexes'}>
             <section className="system-section">
-                <div className="system-section-heading"><div><h2>Indexes</h2><p>Open, add, reindex, or inspect your projects.</p></div><button type="button" onClick={onOpenProjects}>Manage indexes</button></div>
+                <div className="system-section-heading"><div><h2>Indexes</h2><p>Index activity from the local daemon.</p></div><button type="button" onClick={onOpenProjects}>Add project index</button></div>
                 <h3>Index activity</h3><p className="system-muted">Current daemon job slots. Slots may be reused; this is not a complete history.</p>
                 <div className="system-table-wrap"><table><thead><tr><th>Repository</th><th>State</th><th>Details</th></tr></thead><tbody>
                     {jobs.data?.map((job, index) => <tr key={`${job.slot}-${index}`}><th scope="row"><code>{job.path || 'Path unavailable'}</code></th><td><span className={`system-job-state system-job-${job.status}`}>{job.status === 'indexing' ? 'Indexing' : job.status === 'done' ? 'Complete' : job.status === 'error' ? 'Failed' : 'Unknown'}</span></td><td>{job.error || 'No details reported'}</td></tr>)}

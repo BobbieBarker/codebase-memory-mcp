@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { messages } from '../i18n/messages';
+import { experimentalAgentsEnabled } from './feature-flags';
 import { overlayIntent } from '../search/overlay-model';
 import { playerIntent } from '../tours/tour-player';
 import { FOCUS_COMMAND_KEY, RESERVED_BARE_SHORTCUTS, menuShortcutFor } from './keyboard';
@@ -119,7 +120,8 @@ describe('die Tastenliste der Hilfe ist die Verdrahtung selbst', () => {
     });
 
     it('sagt zu jeder Taste, was sie tut, und zu keiner anderen', () => {
-        const documented = Object.keys(messages.help.shortcutDoes).sort();
+        const documented = Object.keys(messages.help.shortcutDoes)
+            .filter(id => experimentalAgentsEnabled || id !== 'mnemonic:g').sort();
         const shown = ATLAS_SHORTCUTS.map(shortcutId).sort();
         expect(shown).toEqual(documented);
         for (const id of shown) {

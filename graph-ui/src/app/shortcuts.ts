@@ -36,6 +36,8 @@ import { FOCUS_COMMAND_KEY, RESERVED_BARE_SHORTCUTS } from './keyboard';
  * wird. Ein Bereich mehr ist billiger als eine Tabelle, die beides gleich
  * aussehen laesst.
  */
+import { experimentalAgentsEnabled } from './feature-flags';
+
 export type ShortcutScope = 'mnemonic' | 'bare' | 'line' | 'walk' | 'search';
 
 /** Eine Taste, die etwas tut, und der Bereich, in dem sie es tut. */
@@ -68,7 +70,8 @@ export interface AtlasShortcut {
  * gepflegte Liste, denn eine gepflegte Liste ist genau die Stelle, an der ein
  * Punkt ohne Verdrahtung wieder hereinrutscht.
  */
-export const WIRED_MENU_SHORTCUTS: readonly string[] = ['a', 'w', 'b', 'c', 'l', 'r', 's', 'g', 'p', '?'];
+export const WIRED_MENU_SHORTCUTS: readonly string[] = ['a', 'w', 'b', 'c', 'l', 'r', 's', 'g', 'p', '?']
+    .filter(key => experimentalAgentsEnabled || key !== 'g');
 
 /**
  * Das Alphabet, gegen das die beiden Absichtsfunktionen befragt werden.

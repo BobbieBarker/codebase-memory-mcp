@@ -28,7 +28,6 @@ export interface ArchitecturePanelProps extends Pick<RepositoryMapProps, 'graph'
     error?: string;
     onRefresh?: () => void;
     onClearSelection?: () => void;
-    onProjectWalk?: () => void;
     systemArchitectureLoader?: SystemArchitectureLoader;
     /** The declaration line is 1-based, as returned by the provider. */
     onNavigate: (filePath: string, line?: number, name?: string) => void;
@@ -246,7 +245,7 @@ function Findings({ view, data, empty, onNavigate }: {
     </section>;
 }
 
-function ArchitectureWorkspace({ projectName, overview, loading = false, error, onRefresh, onProjectWalk, onNavigate, graph, selection, selectionPanel, onSelect, onClearSelection, graphNote, graphGeneration, readSource, active = true, coverage, systemArchitectureLoader }: ArchitecturePanelProps): JSX.Element {
+function ArchitectureWorkspace({ projectName, overview, loading = false, error, onRefresh, onNavigate, graph, selection, selectionPanel, onSelect, onClearSelection, graphNote, graphGeneration, readSource, active = true, coverage, systemArchitectureLoader }: ArchitecturePanelProps): JSX.Element {
     const storage = useMemo(browserStorage, []);
     const [config, setConfig] = useState(() => readArchitectureConfig(storage, projectName));
     const [saved, setSaved] = useState(true);
@@ -260,10 +259,6 @@ function ArchitectureWorkspace({ projectName, overview, loading = false, error, 
     const systemView = config.view === 'structure' || config.view === 'behavior' ? config.view : undefined;
     const SpatialView = config.view === 'routes' ? RoutesArchitecture : SpatialArchitecture;
     return <section className="atlas-architecture" data-testid="atlas-architecture" data-system-view={systemView} aria-label={text.title} aria-busy={!systemView && loading}>
-        <header className="atlas-arch-heading"><span className="atlas-arch-project">{projectName}</span>
-            <div className="repo-map-directions">{onProjectWalk && <button onClick={onProjectWalk} disabled={!projectName}>{text.importWalk}</button>}
-                {onRefresh && !systemView && <button className="atlas-arch-action" onClick={onRefresh} disabled={loading || !projectName}>{text.refresh}</button>}</div>
-        </header>
         <nav className="atlas-arch-tabs" aria-label={text.navigation}>{ARCHITECTURE_VIEWS.map(view =>
             <button className="atlas-arch-tab" key={view} aria-pressed={config.view === view || (view === 'overview' && ['dependencies', 'entryPoints'].includes(config.view))} data-view={view}
                 onClick={() => setConfig(current => ({ ...current, view }))}>{text.views[view]}</button>)}</nav>

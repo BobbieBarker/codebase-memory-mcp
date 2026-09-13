@@ -173,7 +173,8 @@ import {
 import type { HierarchyRootOrigin } from './hierarchy-layout';
 import type { ClosureResult } from '../provider/closure';
 import type { HierarchyStatus } from './selection-hierarchy';
-import { readerGraphFocus, type SourceFocusRange } from './reader-graph-focus';
+import { readerFocusFrame, readerGraphFocus, type SourceFocusRange } from './reader-graph-focus';
+import { projectReaderHierarchy } from './reader-hierarchy';
 import Hint from '../ui/tooltip/Hint';
 import type { GraphData, GraphNode } from './types';
 import {
@@ -1022,11 +1023,17 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      * er gemeint, auch wenn der Leser darin gerade woanders hinsieht.
      */
     const activeWalk = walk ?? props.focusWalk;
-    const hierarchyOrigin: HierarchyRootOrigin = walk === undefined ? 'focus' : 'walk';
+    const readerHierarchyActive = walk === undefined && Boolean(props.focusFilePath);
+    const readerProjection = useMemo(() => readerHierarchyActive && data
+        ? projectReaderHierarchy(data, props.focusFilePath!, props.focusSourceRange) : undefined,
+    [readerHierarchyActive, data, props.focusFilePath, props.focusSourceRange]);
+    const hierarchyOrigin: HierarchyRootOrigin = walk !== undefined ? 'walk'
+        : readerHierarchyActive ? 'file' : 'focus';
 
     const projection = useMemo(
-        () => (activeWalk === undefined ? undefined : projectHierarchy(activeWalk, { layout: data })),
-        [activeWalk, data],
+        () => readerHierarchyActive ? readerProjection
+            : activeWalk === undefined ? undefined : projectHierarchy(activeWalk, { layout: data }),
+        [readerHierarchyActive, readerProjection, activeWalk, data],
     );
 
     /*
@@ -1049,8 +1056,8 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      * sie vor W9 gezeigt hat.
      */
     const indexEdges = useMemo(
-        () => (projection === undefined ? [] : hierarchyIndexEdges(projection, data)),
-        [projection, data],
+        () => (readerHierarchyActive || projection === undefined ? [] : hierarchyIndexEdges(projection, data)),
+        [readerHierarchyActive, projection, data],
     );
 
     /*
@@ -1089,9 +1096,9 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
     // Graphen und nicht alle, die die Tabelle kennt.
     const legend = useMemo(
         () => (mode === 'hierarchy'
-            ? hierarchyLegendEntries(picture)
+            ? hierarchyLegendEntries(picture, readerHierarchyActive)
             : galaxyLegendEntries(picture)),
-        [mode, picture],
+        [mode, picture, readerHierarchyActive],
     );
 
     // Der Inhalt hat sich geaendert (aufgeklappt, Ansicht gewechselt, eine Art
@@ -1429,11 +1436,11 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
             setNote(GALAXY_NO_FOCUS_NOTE);
             return;
         }
-        if (props.focusFilePath && (!node || readerGraphFocus([node], props.focusFilePath).ids.size === 0)) {
+        if (props.focusFilePath) {
             const focus = readerGraphFocus(data.nodes, props.focusFilePath, props.focusSourceRange);
             setHighlighted(focus.ids);
             setNote(focus.message);
-            if (focus.ids.size > 0) flyTo(data.nodes, focus.ids, props.focusFilePath);
+            if (focus.ids.size > 0) flyTo(data.nodes, readerFocusFrame(focus.ids, data.edges), props.focusFilePath);
             return;
         }
         if (!focusQualifiedName) return;
@@ -1563,7 +1570,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      * dorthin gehoert, wo der Leser hingegangen ist.
      */
     const pulsedNode = useMemo(() => {
-        if (backgroundCleared || mode !== 'hierarchy') {
+        if (backgroundCleared || mode !== 'hierarchy' || readerHierarchyActive) {
             return undefined;
         }
         for (const candidate of [focusQualifiedName, stepQualifiedName]) {
@@ -1575,7 +1582,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
             }
         }
         return undefined;
-    }, [backgroundCleared, mode, focusQualifiedName, stepQualifiedName, index]);
+    }, [backgroundCleared, mode, readerHierarchyActive, focusQualifiedName, stepQualifiedName, index]);
 
     /*
      * In der Hierarchie bleibt alles hell.
@@ -1593,8 +1600,8 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
             return;
         }
         setHighlighted(new Set(projection.data.nodes.map((node) => node.id)));
-        setNote(pulsedNode === undefined ? HIERARCHY_NO_FOCUS_NOTE : '');
-    }, [mode, projection, pulsedNode]);
+        setNote(readerProjection ? readerProjection.message : pulsedNode === undefined ? HIERARCHY_NO_FOCUS_NOTE : '');
+    }, [mode, projection, pulsedNode, readerProjection]);
 
     // Rueck-Richtung: ein Klick in die Szene oeffnet die Datei.
     const handleNodeClick = useCallback(
@@ -1628,10 +1635,10 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
     const handleBackgroundClick = useCallback(() => {
         setBackgroundCleared(true);
         setHighlighted(null);
-        setNote(mode === 'hierarchy' ? HIERARCHY_NO_FOCUS_NOTE : GALAXY_NO_FOCUS_NOTE);
+        setNote(mode === 'hierarchy' ? readerProjection?.message ?? HIERARCHY_NO_FOCUS_NOTE : GALAXY_NO_FOCUS_NOTE);
         refitNow();
         props.onClearSelection?.();
-    }, [mode, refitNow, props.onClearSelection]);
+    }, [mode, refitNow, props.onClearSelection, readerProjection]);
 
     /*
      * Die Vorgabe der Ansicht, mit der Wahl des Lesers darauf.
@@ -1649,10 +1656,16 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
     const layoutState = error.length > 0 ? 'failed' : data === undefined ? 'loading' : 'ready';
     // Die Hierarchie braucht das Layout nicht: sie faerbt sich damit, sie lebt
     // nicht davon. Ein Walk, dessen Bild dasteht, ist fertig.
-    const state = mode === 'hierarchy' ? projection ? 'ready' : props.focusWalkStatus === 'loading' ? 'loading' : props.focusWalkStatus === 'unavailable' ? 'failed' : 'empty' : layoutState;
+    const state = mode === 'hierarchy' ? projection ? 'ready'
+        : readerHierarchyActive ? layoutState === 'ready' ? 'empty' : layoutState
+        : props.focusWalkStatus === 'loading' ? 'loading' : props.focusWalkStatus === 'unavailable' ? 'failed' : 'empty' : layoutState;
     const headline =
         mode === 'hierarchy'
-            ? projection ? hierarchyHeadline(projection, hierarchyOrigin) : props.focusWalkMessage || 'Choose a symbol to see its outgoing call hierarchy.'
+            ? projection ? readerProjection?.headline ?? hierarchyHeadline(projection, hierarchyOrigin)
+                : readerHierarchyActive ? layoutState === 'loading' ? 'Loading file relationships…'
+                    : layoutState === 'failed' ? `layout unavailable: ${error}`
+                    : `${props.focusFilePath} is not in the loaded graph layout.`
+                : props.focusWalkMessage || 'Choose a symbol to see its outgoing call hierarchy.'
             : layoutState === 'failed'
                 ? `layout unavailable: ${error}`
                 : layoutState === 'loading'
@@ -1674,9 +1687,9 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      */
     const edgeNote = [
         mode === 'hierarchy' && projection !== undefined
-            ? hierarchyEdgeNote(projection.data.edges.length, indexEdges.length)
+            ? readerProjection?.edgeNote ?? hierarchyEdgeNote(projection.data.edges.length, indexEdges.length)
             : '',
-        mode === 'hierarchy' && walk === undefined && projection ? props.focusWalkMessage ?? '' : '',
+        mode === 'hierarchy' && !readerHierarchyActive && walk === undefined && projection ? props.focusWalkMessage ?? '' : '',
         kindNote,
     ].filter((part) => part.length > 0).join('; ');
 
@@ -1869,9 +1882,9 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
                             to: projection.data.nodes[edge.target]?.qualified_name
                                 ?? projection.data.nodes[edge.target]?.name ?? '',
                         })),
-                        walkEdges: projection.data.edges.length,
-                        extraEdges: indexEdges.length,
-                        extras: indexEdges.map((edge) => ({
+                        walkEdges: readerHierarchyActive ? 0 : projection.data.edges.length,
+                        extraEdges: readerHierarchyActive ? projection.data.edges.length : indexEdges.length,
+                        extras: (readerHierarchyActive ? projection.data.edges : indexEdges).map((edge) => ({
                             type: edge.type,
                             from: projection.data.nodes[edge.source]?.qualified_name
                                 ?? projection.data.nodes[edge.source]?.name ?? '',
@@ -1992,6 +2005,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
                                                     ? graphModeActiveTitle(candidate)
                                                     : candidate === 'galaxy'
                                                         ? 'galaxy: the whole project, laid out by the server'
+                                                        : readerHierarchyActive ? 'hierarchy: incoming relationships, file definitions, and outgoing relationships'
                                                         : 'hierarchy: what the chosen symbol reaches, one column per call depth'
                                     }
                                 >
@@ -2246,6 +2260,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
                         data={shown}
                         display={display}
                         highlightedIds={highlighted}
+                        emphasizeIncidentEdges={mode === 'galaxy' && Boolean(props.focusFilePath)}
                         cameraTarget={cameraTarget}
                         /*
                          * In der Hierarchie tragen alle Namen dieselbe

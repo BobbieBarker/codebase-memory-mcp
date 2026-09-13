@@ -21,5 +21,7 @@
 .atlas-project-picker footer { display: flex; justify-content: space-between; flex-shrink: 0; gap: 8px; padding-top: 10px; border-top: 1px solid var(--atlas-line); }
 .atlas-project-picker footer button { padding: 6px 8px; color: var(--atlas-cyan); background: transparent; border: 1px solid var(--atlas-line); }
 .atlas-project-picker button:disabled { opacity: .5; cursor: default; }
+.atlas-project-index-activity { display: flex; justify-content: space-between; gap: 10px; padding: 10px; color: var(--atlas-fg); background: var(--atlas-select); border: 1px solid var(--atlas-line); text-align: left; overflow-wrap: anywhere; }
+.atlas-project-index-activity span:first-child { color: var(--atlas-cyan); }
 @media (max-width: 1200px) { .atlas-project-switcher { flex-basis: 170px; min-width: 120px; } .atlas-project-switcher-label { display: none; } }
 @media (max-width: 700px) { .atlas-project-switcher { flex-basis: 220px; } }

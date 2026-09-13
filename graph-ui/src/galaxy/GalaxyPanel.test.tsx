@@ -723,6 +723,14 @@ const withScene = (): void => {
 describe('hierarchy selection regression', () => {
     beforeEach(withScene);
 
+    it('keeps an explicit entry-point walk when the reader has a file selected', async () => {
+        await render(props({ walk: walkOf(), focusFilePath: 'src/services/userService.ts' }));
+        expect(seam().mode).toBe('hierarchy');
+        expect(seam().hierarchyOrigin).toBe('walk');
+        expect(seam().hierarchy?.root).toBe(WALK_QN.createUser);
+        expect(seam().hierarchy?.nodes).toBe(4);
+    });
+
     it('resolves a hierarchy render ID collision to the canonical selected symbol', async () => {
         const unrelated = { ...LAYOUT.nodes[2]!, id: 0 };
         const fetchLayout = vi.fn(async () => new Response(JSON.stringify({

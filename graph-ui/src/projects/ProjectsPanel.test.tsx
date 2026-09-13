@@ -34,6 +34,17 @@ const PROJECTS: ProjectEntry[] = [
     { name: 'rootless' },
 ];
 
+it('opens the dedicated ADR workspace without fetching a second editable copy', async () => {
+    const source = fakeSource();
+    const onOpenAdr = vi.fn();
+    await render({ source, onOpenAdr });
+    expect(source.calls.adr).toBeUndefined();
+    expect(container.querySelector('[data-testid="atlas-projects-adr-text"]')).toBeNull();
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === 'Open ADR')!;
+    await act(async () => button.click());
+    expect(onOpenAdr).toHaveBeenCalledOnce();
+});
+
 function fakeSource(jobs: () => IndexJob[] = () => []): ProjectsSource & { calls: Record<string, unknown[][]> } {
     const calls: Record<string, unknown[][]> = {};
     const record = <T,>(name: string, impl: (...args: never[]) => T) => (...args: never[]): T => {

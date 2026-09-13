@@ -76,6 +76,7 @@ async function render(overrides: Partial<SettingsPanelProps> = {}): Promise<Sett
         onSelectModel: vi.fn(),
         onRefresh: vi.fn(),
         display: DEFAULT_GRAPH_DISPLAY,
+        experimentalAgents: true,
         onDisplay: vi.fn(),
         onClose: vi.fn(),
         ...overrides,
@@ -137,6 +138,13 @@ describe('das Panel als Ganzes', () => {
 });
 
 describe('browser model settings', () => {
+    it('hides agent display controls in the default build while keeping graph and browser model controls', async () => {
+        await render({ experimentalAgents: undefined, onOpenBrowserModels: vi.fn() });
+        expect(all('atlas-settings-effect').map(node => node.getAttribute('data-effect')))
+            .toEqual(['halos', 'bloom', 'edges', 'labels']);
+        expect(find('atlas-settings-browser-models')).not.toBeNull();
+    });
+
     it.each(['off', 'not-running', 'ready'] as const)('replaces sidecar setup with one browser model entry when sidecar state is %s', async (state) => {
         await render({ state, onOpenBrowserModels: vi.fn() });
         expect(all('atlas-settings-section').map((node) => node.getAttribute('data-section')))

@@ -35,8 +35,7 @@ import type { CommandExample } from '../search/command-examples';
 import Hint from '../ui/tooltip/Hint';
 import { LAYOUT_DEFAULT } from '../layout/layout-model';
 import Splitter from '../layout/Splitter';
-import { workspaceStrings } from './workspace-strings';
-import GraphEdgeControls from '../graph/GraphEdgeControls';
+import { availableWorkspaces, workspaceStrings } from './workspace-strings';
 import type { Workspace, Guidance } from './workspace-strings';
 
 /** Ein Menuepunkt: sein Buchstaben-Kuerzel und der Rest des Wortes. */
@@ -151,6 +150,7 @@ export interface AtlasChromeProps {
     daemonState?: 'connected' | 'disconnected' | 'checking';
     globalOverlay?: ReactNode;
     workspace?: Workspace;
+    experimentalAgents?: boolean;
     onWorkspaceChange?: (workspace: Workspace) => void;
     workspacePanel?: ReactNode;
     workspaceStatus?: ReactNode;
@@ -542,7 +542,6 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
     const graphHeight = graphSpace * graphShare;
     const [searchOpen, setSearchOpen] = useState(false);
     const searchDialog = useRef<HTMLDialogElement>(null);
-    const searchButton = useRef<HTMLButtonElement>(null);
     const searchOpener = useRef<HTMLElement | null>(null);
     const inlineGalaxyHost = useRef<HTMLDivElement>(null);
     const chatGalaxyHost = useRef<HTMLDivElement>(null);
@@ -629,7 +628,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
             else dialog.removeAttribute('open');
             const opener = searchOpener.current;
             if (opener?.isConnected && !dialog.contains(opener)) opener.focus();
-            else searchButton.current?.focus();
+            else dialog.closest('.atlas-shell')?.querySelector<HTMLButtonElement>('[data-workspace-tab][aria-selected="true"]')?.focus();
         }
     }, [searchOpen]);
     const examples = props.commandExamples ?? [];
@@ -685,12 +684,12 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                   */}
                 {props.onWorkspaceChange !== undefined && (
                     <nav className="atlas-workspace-tabs" role="tablist" aria-label={workspaceStrings.navigation}>
-                        {workspaceStrings.workspaces.map((workspace, index) => (
+                        {availableWorkspaces(props.experimentalAgents).map((workspace, index) => (
                             <button type="button" role="tab" key={workspace.id} data-workspace-tab={workspace.id}
                                 tabIndex={(props.workspace ?? 'explore') === workspace.id ? 0 : -1}
                                 aria-selected={(props.workspace ?? 'explore') === workspace.id}
                                 onKeyDown={(event) => {
-                                    const choices = workspaceStrings.workspaces;
+                                    const choices = availableWorkspaces(props.experimentalAgents);
                                     const next = event.key === 'ArrowRight' ? (index + 1) % choices.length
                                         : event.key === 'ArrowLeft' ? (index + choices.length - 1) % choices.length
                                         : event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : -1;
@@ -707,19 +706,13 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                 )}
                 {props.onOpenSystem !== undefined && <button type="button" className="atlas-daemon-action" data-state={props.daemonState ?? 'checking'} onClick={props.onOpenSystem}
                     aria-label={workspaceStrings.daemonNavigation(props.daemonState ?? 'checking')}><span aria-hidden="true" />{workspaceStrings.daemon}</button>}
-                {props.onOpenBrowserAi !== undefined && <button type="button" className="atlas-browser-ai-action" aria-expanded={props.chatOpen === true} onClick={props.onOpenBrowserAi}>{workspaceStrings.browserAi}</button>}
-                <button ref={searchButton} type="button" className="atlas-search-action"
-                    aria-label={workspaceStrings.searchOpen} aria-haspopup="dialog"
-                    aria-expanded={searchOpen} onClick={openSearch}>
-                    {workspaceStrings.search}<kbd>{workspaceStrings.searchShortcut}</kbd>
-                </button>
-                <GraphEdgeControls />
                 <div className="atlas-chips">
                     {props.chips.filter(chip => props.projectSwitcher === undefined || chip.label !== messages.statusbar.chipProject).map((chip) => (
                         <ChipView key={chip.label} chip={chip} />
                     ))}
                 </div>
                 {props.projectSwitcher}
+                {props.onOpenBrowserAi !== undefined && <button type="button" className="atlas-browser-ai-action" aria-expanded={props.chatOpen === true} onClick={props.onOpenBrowserAi}>{workspaceStrings.browserAi}</button>}
             </header>
 
             {props.workspaceStatus}

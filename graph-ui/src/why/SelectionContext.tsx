@@ -14,7 +14,7 @@ export default function SelectionContextPanel({ graph, selected, path, agents, o
     const callerFiles = new Set(callers.map(edge => edge.source.file_path).filter(Boolean));
     return <section className="selection-context" aria-label="Selection context" data-testid="selection-context">
         <h3>Selection context</h3>
-        {!path ? <p>Select a file or symbol to inspect its indexed connections and recorded activity.</p> : <>
+        {!path ? <p>Select a file or symbol to inspect its indexed connections.</p> : <>
             <p className="selection-context-subject">{selected?.name ?? path}</p>
             <h4>Graph evidence</h4>
             {!graph ? <p>The repository graph is not available. Relevance cannot be established yet.</p> : <>
@@ -31,7 +31,7 @@ export default function SelectionContextPanel({ graph, selected, path, agents, o
                 {context.outgoing.length > 0 && <details><summary>Outgoing relationships · {context.outgoing.length}</summary><RelationshipEvidence edges={context.outgoing} onNavigate={onNavigate} /></details>}
                 {context.pathSearchLimited && !context.entryPath.length && <p>No entry path found within 4 calls / 500 visited symbols. Longer paths were not evaluated.</p>}
             </>}
-            <details><summary>Observed agent activity · {context.activity.length} retained events for this file</summary>
+            {agents && <details><summary>Observed agent activity · {context.activity.length} retained events for this file</summary>
             {context.activity.length === 0 ? <p>No observed tool event for this file is available in the loaded agent activity. The Agents view shows the connection and event source.</p>
                 : <ul>{context.activity.map(({ agent, event }) => <li key={`${agent}:${event.run}:${event.seq}:${event.phase}`}>
                     <details><summary>{agent} · {event.tool} · {event.phase} · <time dateTime={new Date(event.ts).toISOString()}>{new Date(event.ts).toLocaleTimeString()}</time></summary>
@@ -40,7 +40,7 @@ export default function SelectionContextPanel({ graph, selected, path, agents, o
                         <button onClick={() => onNavigate(path, event.lines?.[0])}>Open event location</button>
                     </details>
                 </li>)}</ul>}
-            </details>
+            </details>}
             <div className="selection-context-actions"><button onClick={() => onNavigate(path, context.selected?.start_line, context.selected?.name)}>Read source evidence</button>
                 {onImpact && <button onClick={onImpact}>Assess change impact</button>}</div>
         </>}

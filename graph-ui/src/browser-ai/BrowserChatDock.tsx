@@ -2,17 +2,18 @@ import { useEffect, useRef, useState, type FormEvent, type JSX } from 'react';
 import type { BrowserAiProgress } from './browser-ai-controller';
 import { createBrowserChatRuntime, type BrowserChatRuntime } from './browser-ai-runtime';
 import { BROWSER_MODELS, removeBrowserModelCache } from './model-policy';
-import { buildChatMessages, selectionLocation, snapshotAttachment, type BrowserChatAttachment, type BrowserChatContext, type BrowserChatTurn } from './chat-model';
+import { buildChatMessages, selectionLocation, snapshotAttachment, snapshotReaderContext, type BrowserChatAttachment, type BrowserChatContext, type BrowserChatReaderContext, type BrowserChatTurn } from './chat-model';
 import ChatMarkdown from './ChatMarkdown';
 import './browser-chat.css';
 
-export type { BrowserChatAttachment, BrowserChatContext } from './chat-model';
+export type { BrowserChatAttachment, BrowserChatContext, BrowserChatReaderContext, BrowserChatSource } from './chat-model';
 export interface BrowserChatDockProps {
     open: boolean;
     onClose: () => void;
     showCollapsed?: boolean;
     onOpen?: () => void;
     attachment?: BrowserChatAttachment;
+    readerContext?: BrowserChatReaderContext;
     context?: readonly BrowserChatContext[];
     pendingContext?: BrowserChatContext;
     onContextConsumed?: (id: string) => void;
@@ -28,12 +29,24 @@ const initialModel = BROWSER_MODELS.find(model => model.availability === 'availa
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const sizeLabel = (bytes: number): string => bytes >= 1_000_000_000 ? `${(bytes / 1_000_000_000).toFixed(2)} GB` : `${Math.ceil(bytes / 1_000_000)} MB`;
 
-function Attachment({ attachment }: { attachment: BrowserChatAttachment }): JSX.Element {
+function Attachment({ attachment, label }: { attachment: BrowserChatAttachment; label?: string }): JSX.Element {
     return <details className="cbm-chat-attachment">
-        <summary><span aria-hidden="true">⌁</span> {selectionLocation(attachment)}</summary>
+        <summary><span aria-hidden="true">⌁</span> {label && `${label} · `}{selectionLocation(attachment)}</summary>
         <pre>{attachment.text}</pre>
         <small>{attachment.project} · Source {attachment.sourceVersion}</small>
     </details>;
+}
+
+function ReaderContext({ context }: { context: BrowserChatReaderContext }): JSX.Element {
+    const current = snapshotReaderContext(context)!;
+    const source = current.source;
+    return <div className="cbm-chat-reader-source" aria-label="Source for next message">
+        {source ? <><details className="cbm-chat-attachment">
+            <summary><span className="cbm-chat-source-kind">{source.kind === 'selection' ? 'Selected code' : 'Current file'}</span><span>{source.kind === 'selection' ? selectionLocation(source) : source.path}</span></summary>
+            <pre>{source.text}</pre><small>{source.project} · Source {source.sourceVersion}</small>
+        </details>{source.partial && <p className="cbm-chat-source-partial">{source.partial}</p>}</>
+            : <div className="cbm-chat-source-state"><span>{current.status === 'loading' ? 'Loading current file…' : current.status === 'empty' ? 'Open a file to include its code.' : 'Current file source is unavailable.'}</span>{current.path && <small>{current.path}</small>}</div>}
+    </div>;
 }
 
 function ContextSnapshot({ context }: { context: BrowserChatContext }): JSX.Element {
@@ -41,7 +54,7 @@ function ContextSnapshot({ context }: { context: BrowserChatContext }): JSX.Elem
 }
 
 /** Keep mounted when collapsed: state and worker lifetime are independent of visibility. */
-export default function BrowserChatDock({ open, onClose, showCollapsed = false, onOpen, attachment, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache }: BrowserChatDockProps): JSX.Element {
+export default function BrowserChatDock({ open, onClose, showCollapsed = false, onOpen, attachment, readerContext, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache }: BrowserChatDockProps): JSX.Element {
     const [modelId, setModelId] = useState(initialModel.id);
     const model = BROWSER_MODELS.find(candidate => candidate.id === modelId) ?? initialModel;
     const [phase, setPhase] = useState<Phase>('off');
@@ -58,6 +71,7 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
     const [selectedContext, setSelectedContext] = useState<BrowserChatContext[]>([]);
     const [handledContextId, setHandledContextId] = useState<string>();
     const graphSelection = pendingContext?.id !== handledContextId ? pendingContext : undefined;
+    const manualAttachment = readerContext === undefined ? attachment : undefined;
     const runtime = useRef<BrowserChatRuntime | undefined>(undefined);
     const epoch = useRef(0);
     const pending = useRef(false);
@@ -76,7 +90,7 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
         if (followOutput.current) { element.scrollTop = element.scrollHeight; setNewOutput(false); }
         else if (phase === 'generating') setNewOutput(true);
     }, [turns, open, phase]);
-    useEffect(() => { if (open && (attachment || graphSelection)) input.current?.focus(); }, [open, attachment?.id, graphSelection?.id]);
+    useEffect(() => { if (open && (manualAttachment || graphSelection)) input.current?.focus(); }, [open, manualAttachment?.id, graphSelection?.id]);
 
     const release = (): void => {
         const id = activeTurn.current;
@@ -113,14 +127,16 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
     const send = async (retry?: BrowserChatTurn): Promise<void> => {
         const currentRuntime = runtime.current;
         if (!currentRuntime || phase !== 'ready' || pending.current || (!retry && !draft.trim())) return;
+        if (!retry && readerContext?.status === 'loading') return;
         pending.current = true; stopRequested.current = false; setStopping(false);
         const ticket = ++epoch.current;
         const prompt = retry?.prompt ?? draft;
-        const source = snapshotAttachment(retry ? retry.attachment : attachment);
+        const source = snapshotAttachment(retry ? retry.attachment : manualAttachment);
+        const reader = snapshotReaderContext(retry ? retry.readerContext : readerContext);
         const selectedGraph = !retry && graphSelection ? { ...graphSelection } : undefined;
         const nextContext = selectedGraph ? [...selectedContext.filter(item => item.id !== selectedGraph.id), selectedGraph] : selectedContext;
         const extra = (retry ? retry.context ?? [] : nextContext).map(item => ({ ...item }));
-        const request = retry ? retry.request.map(message => ({ ...message })) : buildChatMessages(turns, prompt, source, extra);
+        const request = retry ? retry.request.map(message => ({ ...message })) : buildChatMessages(turns, prompt, source, extra, reader);
         setError(undefined); setNotice(undefined); setPhase('counting');
         try {
             const count = await currentRuntime.countTokens(request);
@@ -132,7 +148,7 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
                 return;
             }
             const id = retry?.id ?? `local-turn-${++nextTurn.current}`;
-            const turn: BrowserChatTurn = { id, prompt, attachment: source, context: extra, modelId: model.id, request, answer: '', status: 'generating' };
+            const turn: BrowserChatTurn = { id, prompt, attachment: source, readerContext: reader, context: extra, modelId: model.id, request, answer: '', status: 'generating' };
             activeTurn.current = id;
             if (retry) setTurns(previous => previous.map(item => item.id === id ? turn : item));
             else {
@@ -221,9 +237,9 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
             followOutput.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
             if (followOutput.current) setNewOutput(false);
         }}>
-            {turns.length === 0 && <div className="cbm-chat-empty"><span aria-hidden="true">⌁</span><h3>Ask about the code.</h3><p>Select code in the reader, then choose “Ask about selection”. Its exact text will travel with your next message.</p><p>You can also ask a question without an attachment.</p></div>}
+            {turns.length === 0 && <div className="cbm-chat-empty"><span aria-hidden="true">⌁</span><h3>Ask about the code.</h3><p>{readerContext ? 'The current file is included automatically. Mark code to focus your next message on that exact selection.' : 'Ask a question, or add source and graph context to your next message.'}</p></div>}
             {turns.map((turn, index) => <article className="cbm-chat-turn" key={turn.id}>
-                <div className="cbm-chat-question"><span className="cbm-chat-speaker">You</span><ChatMarkdown text={turn.prompt} />{turn.attachment && <Attachment attachment={turn.attachment} />}{turn.context?.map(item => <ContextSnapshot key={item.id} context={item} />)}</div>
+                <div className="cbm-chat-question"><span className="cbm-chat-speaker">You</span><ChatMarkdown text={turn.prompt} />{turn.attachment && <Attachment attachment={turn.attachment} />}{turn.readerContext?.source && <Attachment attachment={turn.readerContext.source} label={turn.readerContext.source.kind === 'selection' ? 'Selection snapshot' : 'File snapshot'} />}{turn.context?.map(item => <ContextSnapshot key={item.id} context={item} />)}</div>
                 <div className="cbm-chat-answer"><span className="cbm-chat-speaker">{BROWSER_MODELS.find(candidate => candidate.id === turn.modelId)?.displayName ?? turn.modelId}</span><div className="cbm-chat-answer-text"><ChatMarkdown text={turn.answer || (turn.status === 'generating' ? 'Thinking…' : turn.status === 'stopped' ? 'Stopped before an answer.' : '')} /></div>
                     {turn.status === 'stopped' && turn.answer && <small>Stopped · partial answer</small>}
                     {turn.status === 'error' && <p className="cbm-chat-turn-error" role="alert">{turn.error}</p>}
@@ -233,7 +249,8 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
         </div>}
         {newOutput && <button type="button" className="cbm-chat-jump" onClick={() => { followOutput.current = true; setNewOutput(false); if (transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight; }}>Latest answer ↓</button>}
         <form className="cbm-chat-composer" onSubmit={submit}>
-            {attachment && <div className="cbm-chat-pending"><div className="cbm-chat-pending-title"><span>Attached to next message</span><button type="button" aria-label="Remove code attachment" disabled={!onAttachmentRemoved} onClick={() => onAttachmentRemoved?.(attachment.id)}>×</button></div><Attachment attachment={attachment} /></div>}
+            {readerContext && <ReaderContext context={readerContext} />}
+            {manualAttachment && <div className="cbm-chat-pending"><div className="cbm-chat-pending-title"><span>Attached to next message</span><button type="button" aria-label="Remove code attachment" disabled={!onAttachmentRemoved} onClick={() => onAttachmentRemoved?.(manualAttachment.id)}>×</button></div><Attachment attachment={manualAttachment} /></div>}
             {graphSelection && <div className="cbm-chat-pending"><div className="cbm-chat-pending-title"><span>Graph selection for next message</span><button type="button" aria-label="Remove graph selection" onClick={() => { setHandledContextId(graphSelection.id); onContextRemoved?.(graphSelection.id); }}>×</button></div><ContextSnapshot context={graphSelection} /></div>}
             {selectedContext.map(item => <div className="cbm-chat-pending" key={item.id}><div className="cbm-chat-pending-title"><span>Context for next message</span><button type="button" aria-label={`Remove ${item.label}`} onClick={() => setSelectedContext(previous => previous.filter(selected => selected.id !== item.id))}>×</button></div><ContextSnapshot context={item} /></div>)}
             {context.length > 0 && <details className="cbm-chat-context-options"><summary>Add context</summary><fieldset><legend>Include in the next message</legend>{context.map(item => <label key={item.id}><input type="checkbox" checked={selectedContext.some(selected => selected.id === item.id)} onChange={event => {
@@ -245,9 +262,9 @@ export default function BrowserChatDock({ open, onClose, showCollapsed = false, 
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); }
             }} />
             <div className="cbm-chat-compose-actions"><button type="button" className="cbm-chat-clear" disabled={busy || !turns.length} onClick={clear}>New conversation</button>
-                {phase === 'counting' || phase === 'generating' ? <button type="button" disabled={stopping} onClick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button> : <button className="cbm-chat-primary" type="submit" disabled={phase !== 'ready' || !draft.trim()}>Send ↑</button>}
+                {phase === 'counting' || phase === 'generating' ? <button type="button" disabled={stopping} onClick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button> : <button className="cbm-chat-primary" type="submit" disabled={phase !== 'ready' || !draft.trim() || readerContext?.status === 'loading'}>Send ↑</button>}
             </div>
-            <p className="cbm-chat-context">{tokenCount !== undefined ? `${tokenCount.toLocaleString()} input tokens in last check · ` : ''}{turns.length ? 'Earlier messages stay in context. ' : ''}Session only · Verify model answers.</p>
+            <p className="cbm-chat-context">{tokenCount !== undefined ? `${tokenCount.toLocaleString()} input tokens in last check · ` : ''}{turns.length ? readerContext ? 'Conversation stays; source follows the reader. ' : 'Earlier messages stay in context. ' : ''}Session only · Verify model answers.</p>
             </>}
         </form>
     </aside>;

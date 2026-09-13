@@ -63,7 +63,7 @@ describe('System workspace', () => {
         expect(overview).not.toContain('0.0%');
         expect(overview).not.toContain('0.0 MiB');
     });
-    it('opens the existing index manager and reads jobs only when needed', async () => {
+    it('opens the add-project flow and reads jobs only when needed', async () => {
         const api = source();
         const onOpenProjects = vi.fn();
         await render(api, onOpenProjects);
@@ -72,7 +72,7 @@ describe('System workspace', () => {
         await click('Indexes');
         expect(api.indexJobs).toHaveBeenCalledTimes(1);
         expect(container.querySelector('#system-panel-indexes')?.textContent).toContain('/repo');
-        await click('Manage indexes');
+        await click('Add project index');
         expect(onOpenProjects).toHaveBeenCalledOnce();
         await click('Overview');
         await act(async () => { await vi.advanceTimersByTimeAsync(500); });

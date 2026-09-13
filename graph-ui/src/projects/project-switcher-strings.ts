@@ -11,5 +11,6 @@ export const projectSwitcherStrings = {
     current: 'Current',
     retry: 'Try again',
     refresh: 'Refresh projects',
-    manage: 'Manage projects',
+    add: 'Add project index',
+    indexActivity: (status: 'indexing' | 'done' | 'error') => status === 'indexing' ? 'Indexing…' : status === 'done' ? 'Index ready' : 'Index needs attention',
 };

@@ -48,6 +48,8 @@
  * schliesst es mit Escape.
  */
 
+import { experimentalAgentsEnabled } from '../app/feature-flags';
+
 /** Was diese Zeile ist, soweit dieses Modul es beurteilt. */
 export type LineCommand =
     | 'reset-layout'
@@ -90,7 +92,7 @@ export const LIVE_AGENTS_COMMAND = 'live agents';
 export const FULLSCREEN_COMMAND = 'fullscreen';
 
 /** Ob diese Zeile einer der vier Befehle ist. */
-export function lineCommandOf(line: string): LineCommand {
+export function lineCommandOf(line: string, agentsEnabled = experimentalAgentsEnabled): LineCommand {
     const normalised = line.trim().toLowerCase().replace(/\s+/g, ' ');
     if (normalised === RESET_LAYOUT_COMMAND) {
         return 'reset-layout';
@@ -98,8 +100,8 @@ export function lineCommandOf(line: string): LineCommand {
     if (normalised === SETTINGS_COMMAND) {
         return 'open-settings';
     }
-    if (normalised === FULLSCREEN_COMMAND) {
+    if (agentsEnabled && normalised === FULLSCREEN_COMMAND) {
         return 'toggle-fullscreen';
     }
-    return normalised === LIVE_AGENTS_COMMAND ? 'toggle-live-agents' : 'none';
+    return agentsEnabled && normalised === LIVE_AGENTS_COMMAND ? 'toggle-live-agents' : 'none';
 }

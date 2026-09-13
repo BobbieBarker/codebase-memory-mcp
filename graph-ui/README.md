@@ -15,17 +15,32 @@ What the maintainers added on top:
 - **CSP.** The served page may reach the server itself plus the loopback
   service explicitly allowed for optional local inference (`src/ui/http_server.h`,
   `CBM_UI_CSP_VALUE`). Nothing else, and a test holds that.
-- **The `[p]rojects` panel** (alt+p, `src/projects/`): index a repository,
-  check or remove an index, edit the decision record, read the server's
-  processes and log. It is the one surface that asks the server to write,
-  and it names every route it uses.
+- **Add project index** (project dropdown or alt+p, `src/projects/`): choose
+  a repository with the daemon's local folder picker, name its index, follow
+  indexing status, then open it. Files are indexed in place, not uploaded.
+  The dialog can close while indexing continues; reopen its activity in the
+  project dropdown. Status comes from the daemon, without invented percentages.
+  This replaces the broad project-management dialog; coverage details stay in
+  Coverage and daemon activity stays in System.
+- **The ADR workspace** (`?workspace=adr`, `src/adr/`): read, create, and
+  explicitly save one Markdown decision document per project. Its sections
+  can hold multiple decisions. This uses the existing `GET/POST /api/adr`
+  store shared with `manage_adr`; it does not edit repository files.
+  Unpublished drafts are retained per project in this browser tab's session
+  storage. Before saving, the UI compares the current server document with
+  the editing baseline and retains the draft if it detects a change. The
+  existing API has no atomic version check, so this is not a document lock.
+  The editor limits new saves to 8,000 UTF-8 bytes for compatibility with
+  MCP section updates, and checks the 16 KiB serialized request limit.
+  Editable preview examples live in `fixtures/adr/`; they are never
+  automatically inserted into real projects or used as inferred graph facts.
 - **The frontend log** (`src/app/ui-log.ts`, installed in `src/main.tsx`):
   the console keeps printing, and a copy of every console line, uncaught
   error, unhandled rejection and failed `/rpc` or `/api` call is batched
   to `POST /api/ui-log`, which the server appends as JSON lines to
   `<cache_dir>/logs/ui.log` (rotating once at 5 MiB). `GET /api/ui-log`
-  tails it, the projects panel shows it under "This server", and a bug
-  report attaches the file. The caught request failures reach the log
+  tails it for diagnostics, and a bug report can attach the file.
+  The caught request failures reach the log
   through `src/provider/error-observer.ts`, the seam the two clients
   announce on before they throw.
 - **Gates in CI** (`.github/workflows/_test.yml`, job `test-ui`, which
@@ -98,7 +113,37 @@ Warum das hier steht: zwischen 13:08 und 23:10 am 2026-08-29 sind fuenf Zyklen
 gebaut und nicht gesehen worden, weil die Vorschau vom Vormittag weiterlief. Ein
 Ablauf, der nur im Kopf einer Sitzung steht, ist beim naechsten Mal weg.
 
+## Explorer chat context
+
+Local browser chat automatically includes the current reader source: the exact
+marked text when a selection exists, otherwise the loaded file. A caret alone
+does not narrow the context. The source is a single replaceable data block in
+the system message, followed by conversation history. Each new message captures
+the current source; previous source blocks are not appended to the conversation.
+Optional graph evidence remains explicitly attachable.
+
+The composer shows which file or selection will be used. Missing source and
+partial file loads are disclosed. The exact request is token-counted before
+generation; oversized files are rejected without silently shortening them.
+Mark a smaller range or start a new conversation to reduce context. Navigation
+does not alter an in-flight request, and Retry replays its original snapshot.
+Model loading remains opt-in, and inference runs in the browser.
+
 ## Die Agentenebene: was live arbeitende Agenten auf dem Graphen zeigen
+
+Agent activity is experimental and hidden in normal builds. To include its
+workspace, hook setup, graph overlay, commands, and display controls, explicitly
+build with `VITE_EXPERIMENTAL_AGENTS=true npm run build` (or start the dev server
+with `VITE_EXPERIMENTAL_AGENTS=true npm run dev`). The value must be exactly
+`true`; URL parameters and saved preferences cannot enable it. Without this
+flag, activity polling is disabled and an old Agents workspace selection opens
+Explore. Browser-local chat is independent of this feature.
+
+This is recorded tool activity from configured adapters, not automatic agent
+observability. The bundled adapter supports Claude Code PostToolUse; other
+clients need their own adapter. The flag does not install hooks or delete any
+existing events in the daemon's SQLite store. Even in an enabled build, the
+reader must turn activity on before the browser polls for events.
 
 Arbeiten KI-Agenten in demselben Repository, kann die Galaxie sie zeigen: je
 Agent ein kleiner leuchtender Koerper, der den Symbolknoten umkreist, an dem er

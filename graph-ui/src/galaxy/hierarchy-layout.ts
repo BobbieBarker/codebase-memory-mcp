@@ -194,7 +194,7 @@ export interface HierarchyPlacement {
 export interface HierarchyProjection {
     /** Die Daten, so wie GraphScene sie erwartet. */
     data: GraphData;
-    /** Die `id` des Wurzelknotens. Die Wurzel ist markiert und nicht geraten. */
+    /** Root render ID, or -1 for a file scope with multiple selected definitions. */
     rootId: number;
     /** Die Identitaet der Wurzel im Walk. */
     rootKey: string;
@@ -554,7 +554,7 @@ export function hierarchyFrame(projection: HierarchyProjection): FrameBox {
  * daraus entsteht derselbe Vorwaerts-Closure mit denselben Grenzen, aber es ist
  * kein Spaziergang, und niemand hat einen Einstieg gewaehlt.
  */
-export type HierarchyRootOrigin = 'walk' | 'focus';
+export type HierarchyRootOrigin = 'walk' | 'focus' | 'file';
 
 /**
  * Was ueber dem Bild steht.

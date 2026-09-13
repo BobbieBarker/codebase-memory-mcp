@@ -295,7 +295,7 @@ export function galaxyLegendEntries(data: GraphData | undefined): LegendEntry[] 
  * Die Schluessel sind dieselben wie in {@link galaxyLegendEntries}, damit ein
  * Leser die Zeile, die er sucht, an derselben Stelle findet.
  */
-export function hierarchyLegendEntries(data: GraphData | undefined): LegendEntry[] {
+export function hierarchyLegendEntries(data: GraphData | undefined, fileRelationships = false): LegendEntry[] {
     const swatches = edgeSwatches(data);
     return [
         {
@@ -311,8 +311,9 @@ export function hierarchyLegendEntries(data: GraphData | undefined): LegendEntry
              * Beziehungen auch, und der Griff zum Ausblenden steht am
              * Punkt selbst (`title`).
              */
-            detail:
-                'one line per call on this walk, cycles included rather than hidden. '
+            detail: fileRelationships
+                ? 'Recorded relationships touching the selected file or marked code. Edge colours retain their original types; this is not a complete call trace.'
+                : 'one line per call on this walk, cycles included rather than hidden. '
                 + 'What else the index records between these symbols is drawn in its own colour: '
                 + 'the calls make the columns.',
             swatches,
@@ -321,8 +322,9 @@ export function hierarchyLegendEntries(data: GraphData | undefined): LegendEntry
         {
             key: 'positions',
             title: 'positions',
-            detail:
-                'columns are the call depth from the entry point, and inside a column the symbols '
+            detail: fileRelationships
+                ? 'Incoming relationships on the left, selected definitions in the middle, outgoing relationships on the right. Recorded containment orders the definition columns; source paths and lines order each column.'
+                : 'columns are the call depth from the entry point, and inside a column the symbols '
                 + 'are ordered by name. A deterministic projection of the walk, not the server layout: '
                 + 'the same walk always draws the same picture.',
             swatches: [],
@@ -348,8 +350,9 @@ export function hierarchyLegendEntries(data: GraphData | undefined): LegendEntry
         {
             key: 'focus',
             title: 'focus',
-            detail:
-                'the symbol the reader stands on carries a ring that follows every step of the walk. '
+            detail: fileRelationships
+                ? 'Opening a file shows its definitions, including isolated nodes. Marking code narrows to the matching symbols and their direct relationships; clearing the mark restores the file.'
+                : 'the symbol the reader stands on carries a ring that follows every step of the walk. '
                 + 'Nothing else dims here: the whole subgraph is the answer. A click on a node opens '
                 + 'its file and takes the twin with it, exactly as in the galaxy.',
             swatches: [],

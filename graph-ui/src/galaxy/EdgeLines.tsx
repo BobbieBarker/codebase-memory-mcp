@@ -49,6 +49,9 @@ interface EdgeLinesProps {
     nodes: GraphNode[];
     edges: GraphEdge[];
     highlightedIds: Set<number> | null;
+    /* Emphasize relationships touching a selected file/range without adding
+     * neighboring nodes to the selection. Other graph views keep their default. */
+    emphasizeIncidentEdges?: boolean;
     opacity?: number;
     /* User edge-brightness multiplier (see DisplaySettings). Layered on top of
      * the automatic density scale. */
@@ -147,6 +150,7 @@ export function createEdgeGeometry({
     nodes,
     edges,
     highlightedIds,
+    emphasizeIncidentEdges = false,
     brightness = 1.0,
     targetNodes,
 }: EdgeLinesProps): THREE.BufferGeometry {
@@ -201,7 +205,7 @@ export function createEdgeGeometry({
         if (hasHighlight) {
             /* A selection stays at full strength (never density-scaled) so it
              * pops against the dimmed rest; only the un-selected bulk is scaled. */
-            intensity = sHL && tHL
+            intensity = (sHL && tHL) || emphasizeIncidentEdges
                 ? EDGE_INTENSITY_FOCUS
                 : EDGE_INTENSITY_MUTED * densityScale;
         }
@@ -285,11 +289,11 @@ export function createEdgeGeometry({
 const EDGE_PULSE_SECONDS = 4.8;
 
 export function EdgeLines({ active = true, opacity = 1.0, ...props }: EdgeLinesProps) {
-    const { nodes, edges, highlightedIds, targetNodes, brightness } = props;
+    const { nodes, edges, highlightedIds, emphasizeIncidentEdges, targetNodes, brightness } = props;
     const moving = useEdgeMotion(active);
     const geometry = useMemo(
-        () => createEdgeGeometry({ nodes, edges, highlightedIds, targetNodes, brightness }),
-        [nodes, edges, highlightedIds, targetNodes, brightness],
+        () => createEdgeGeometry({ nodes, edges, highlightedIds, emphasizeIncidentEdges, targetNodes, brightness }),
+        [nodes, edges, highlightedIds, emphasizeIncidentEdges, targetNodes, brightness],
     );
     const uniforms = useMemo(() => ({ edgeTime: { value: 0 }, edgeMotion: { value: 0 } }), []);
     const lastFrame = useRef<number | null>(null);

@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import BrowserChatDock, { type BrowserChatAttachment, type BrowserChatDockProps } from './BrowserChatDock';
+import BrowserChatDock, { type BrowserChatAttachment, type BrowserChatDockProps, type BrowserChatReaderContext } from './BrowserChatDock';
 import type { BrowserAiProgress, BrowserChatMessage } from './browser-ai-runtime';
 import { BROWSER_MODELS } from './model-policy';
 
@@ -15,6 +15,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.restoreAllMocks(); });
 
 const selection: BrowserChatAttachment = { id: 'selection-1', text: '\t a +\r\n b  ', path: 'src/sum.ts', project: 'sample', startLine: 3, startColumn: 7, endLine: 4, endColumn: 5, sourceVersion: 'sha256:123' };
+const reader = (text: string, kind: 'file' | 'selection' = 'file', path = 'src/sum.ts'): BrowserChatReaderContext => ({ project: 'sample', path, status: 'ready', source: { ...selection, text, path, kind, id: `reader-${path}-${kind}` } });
 function fixture() {
     const runtime = {
         prepare: vi.fn(async (_progress: (value: BrowserAiProgress) => void) => {}),
@@ -310,5 +311,124 @@ describe('persistent local browser chat', () => {
         expect(container.querySelector('.cbm-chat-question .cbm-chat-attachment b')).toBeNull();
         expect(runtime.chat.mock.calls[0][0].at(-1)!.content).toContain(prompt);
         expect(runtime.chat.mock.calls[0][0].at(-1)!.content).toContain(attachedCode.text);
+    });
+
+    it('shows automatic source before model setup without downloading or offering removal', async () => {
+        const { props } = fixture();
+        const context = reader('Loaded excerpt'); context.source!.partial = 'Only lines 20–80 are loaded.';
+        await render({ ...props, readerContext: context, attachment: { ...selection, text: 'IGNORED_MANUAL_CODE' } });
+        expect(props.createRuntime).not.toHaveBeenCalled();
+        expect(container.querySelector('[aria-label="Source for next message"]')?.textContent).toContain('Current file');
+        expect(container.querySelector('.cbm-chat-source-partial')?.textContent).toBe(context.source!.partial);
+        expect(container.querySelector('pre')?.textContent).toBe('Loaded excerpt');
+        expect(container.textContent).not.toContain('IGNORED_MANUAL_CODE');
+        expect(container.querySelector('[aria-label="Remove code attachment"]')).toBeNull();
+        expect(container.querySelector('textarea')).toBeNull();
+    });
+
+    it('refreshes one system source from file to literal selection to a different file without accumulating code', async () => {
+        const { props, runtime } = fixture();
+        await render({ ...props, readerContext: reader('WHOLE_FIRST_FILE') });
+        await click('Download & load'); await type('Explain the file'); await click('Send ↑');
+        await render({ ...props, readerContext: reader(selection.text, 'selection') });
+        await type('Explain the marked code'); await click('Send ↑');
+        await render({ ...props, readerContext: reader('WHOLE_SECOND_FILE', 'file', 'src/other.ts') });
+        await type('Explain this other file'); await click('Send ↑');
+        const requests = runtime.chat.mock.calls.map(call => call[0]);
+        expect(requests[0][0].content).toContain('WHOLE_FIRST_FILE');
+        expect(requests[1][0].content).toContain(selection.text);
+        expect(requests[1].map(message => message.content).join('\n')).not.toContain('WHOLE_FIRST_FILE');
+        expect(requests[2][0].content).toContain('WHOLE_SECOND_FILE');
+        expect(requests[2].map(message => message.content).join('\n')).not.toContain('WHOLE_FIRST_FILE');
+        expect(requests[2].map(message => message.content).join('\n')).not.toContain(selection.text);
+        expect(requests[2].filter(message => message.role === 'user').map(message => message.content)).toEqual(['Explain the file', 'Explain the marked code', 'Explain this other file']);
+        expect(props.onAttachmentConsumed).not.toHaveBeenCalled();
+        expect(container.querySelectorAll('.cbm-chat-question .cbm-chat-attachment')).toHaveLength(3);
+        await render(props); await type('Ask from another workspace'); await click('Send ↑');
+        expect(runtime.chat.mock.calls[3][0].map(message => message.content).join('\n')).not.toMatch(/WHOLE_FIRST_FILE|WHOLE_SECOND_FILE/);
+    });
+
+    it('uses the same frozen reader snapshot for counting and generation despite navigation or prop mutation', async () => {
+        const { props, runtime } = fixture(); const count = deferred<number>();
+        runtime.countTokens.mockReturnValueOnce(count.promise);
+        const original = reader('ORIGINAL_LITERAL\r\n\t  ', 'selection');
+        await render({ ...props, readerContext: original }); await click('Download & load'); await type('Explain'); await click('Send ↑');
+        const counted = runtime.countTokens.mock.calls[0][0];
+        original.source!.text = 'MUTATED_AFTER_COUNT';
+        await render({ ...props, readerContext: reader('NEW_CURRENT_FILE', 'file', 'new.ts') });
+        await act(async () => count.resolve(100));
+        expect(runtime.chat.mock.calls[0][0]).toEqual(counted);
+        expect(runtime.chat.mock.calls[0][0][0].content).toContain('ORIGINAL_LITERAL\r\n\t  ');
+        expect(container.querySelector('.cbm-chat-question pre')?.textContent).toBe('ORIGINAL_LITERAL\r\n\t  ');
+        expect(container.querySelector('.cbm-chat-reader-source pre')?.textContent).toBe('NEW_CURRENT_FILE');
+        expect(runtime.chat.mock.calls[0][0][0].content).not.toContain('MUTATED_AFTER_COUNT');
+    });
+
+    it('retries an automatic request exactly while newer source is loading', async () => {
+        const { props, runtime } = fixture(); runtime.chat.mockRejectedValueOnce(new Error('GPU interrupted'));
+        await render({ ...props, readerContext: reader('ORIGINAL_RETRY_SOURCE') }); await click('Download & load'); await type('Explain'); await click('Send ↑');
+        const request = runtime.chat.mock.calls[0][0];
+        await render({ ...props, readerContext: { project: 'sample', path: 'loading.ts', status: 'loading' } });
+        await type('New question');
+        expect(button('Send ↑').disabled).toBe(true);
+        await click('Retry');
+        expect(runtime.chat.mock.calls[1][0]).toEqual(request);
+        expect(runtime.countTokens.mock.calls[1][0]).toEqual(request);
+        expect(container.querySelector('textarea')?.value).toBe('New question');
+        expect(props.onAttachmentConsumed).not.toHaveBeenCalled();
+    });
+
+    it('keeps new sends pending until a switched file is loaded and never falls back to stale code', async () => {
+        const { props, runtime } = fixture();
+        await render({ ...props, readerContext: reader('OLD_CODE') }); await click('Download & load'); await type('Explain');
+        await render({ ...props, attachment: selection, readerContext: { ...reader('STALE_CODE'), status: 'loading' } });
+        expect(button('Send ↑').disabled).toBe(true);
+        await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        expect(runtime.countTokens).not.toHaveBeenCalled();
+        expect(runtime.chat).not.toHaveBeenCalled();
+        expect(container.querySelector('.cbm-chat-reader-source pre')).toBeNull();
+        expect(container.textContent).toContain('Loading current file');
+        await render({ ...props, attachment: selection, readerContext: { project: 'sample', path: 'new.ts', status: 'unavailable' } });
+        await click('Send ↑');
+        expect(runtime.chat.mock.calls[0][0][0].content).toContain('"status":"unavailable"');
+        expect(runtime.chat.mock.calls[0][0].map(message => message.content).join('\n')).not.toContain(selection.text);
+        expect(runtime.chat.mock.calls[0][0].map(message => message.content).join('\n')).not.toMatch(/OLD_CODE|STALE_CODE/);
+        await render({ ...props, readerContext: { project: 'sample', status: 'empty' } });
+        expect(container.querySelector('.cbm-chat-reader-source')?.textContent).toContain('Open a file');
+    });
+
+    it('preserves explicitly chosen graph evidence alongside automatic system source', async () => {
+        const { props, runtime } = fixture();
+        const pendingContext = { id: 'g', label: 'Callers', text: 'entry calls helper' };
+        await render({ ...props, readerContext: reader('CURRENT_CODE'), pendingContext, attachment: { ...selection, text: 'MANUAL_IGNORED' } });
+        await click('Download & load'); await type('Explain both'); await click('Send ↑');
+        expect(runtime.chat.mock.calls[0][0][0].content).toContain('CURRENT_CODE');
+        expect(runtime.chat.mock.calls[0][0].at(-1)?.content).toContain(pendingContext.text);
+        expect(runtime.chat.mock.calls[0][0].at(-1)?.content).not.toContain('CURRENT_CODE');
+        expect(runtime.chat.mock.calls[0][0].map(message => message.content).join('\n')).not.toContain('MANUAL_IGNORED');
+        expect(props.onAttachmentConsumed).not.toHaveBeenCalled();
+    });
+
+    it('does not steal reader focus when automatic source changes', async () => {
+        const { props } = fixture();
+        await render({ ...props, readerContext: reader('FIRST') }); await click('Download & load');
+        const readerControl = document.createElement('button'); document.body.append(readerControl); readerControl.focus();
+        try {
+            await render({ ...props, readerContext: reader('SECOND', 'selection'), attachment: selection });
+            expect(document.activeElement).toBe(readerControl);
+            await render({ ...props, readerContext: reader('THIRD', 'file', 'other.ts'), attachment: { ...selection, id: 'changed-manual' } });
+            expect(document.activeElement).toBe(readerControl);
+        } finally { readerControl.remove(); }
+    });
+
+    it('rejects oversized automatic source without shortening it or clearing the question', async () => {
+        const { props, runtime } = fixture(); runtime.countTokens.mockResolvedValueOnce(99_999);
+        const text = 'x'.repeat(30_000) + '\r\n\tlast  ';
+        await render({ ...props, readerContext: reader(text) }); await click('Download & load'); await type('Explain exactly'); await click('Send ↑');
+        expect(runtime.countTokens.mock.calls[0][0][0].content).toContain(text);
+        expect(runtime.chat).not.toHaveBeenCalled();
+        expect(container.querySelector('textarea')?.value).toBe('Explain exactly');
+        expect(container.querySelector('.cbm-chat-reader-source pre')?.textContent).toBe(text);
+        expect(container.textContent).toContain('Nothing was sent or shortened');
     });
 });

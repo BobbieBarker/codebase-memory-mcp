@@ -284,9 +284,12 @@ describe('AtlasChrome', () => {
 
     it('forwards command keys while Escape closes search and restores its trigger', async () => {
         const handled = vi.fn();
-        await render(props({ onCommandKeyDown: handled }));
-        const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Open search and commands"]')!;
-        await act(async () => { trigger.focus(); trigger.click(); });
+        await render(props({ onCommandKeyDown: handled, children: <button data-testid="reader-focus">Reader</button> }));
+        const trigger = testId('reader-focus') as HTMLButtonElement;
+        await act(async () => {
+            trigger.focus();
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+        });
         const input = testId('atlas-command-input') as HTMLInputElement;
         await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
         expect(handled).toHaveBeenCalledOnce();
