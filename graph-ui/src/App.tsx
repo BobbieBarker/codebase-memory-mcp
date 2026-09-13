@@ -4950,7 +4950,7 @@ export default function App(): JSX.Element {
             splitTwin={galaxyOn
                 ? splitter('twinHeight', 'atlas-split-twin', 'horizontal', messages.layout.splitter.twin)
                 : undefined}
-            explain={
+            explain={explainOpen ? (
                 <ExplainZone
                     tabs={explainTabList}
                     active={explainTab}
@@ -4964,7 +4964,7 @@ export default function App(): JSX.Element {
                 >
                     {explainPanel}
                 </ExplainZone>
-            }
+            ) : undefined}
         >
             {/*
               * Die Frage und der Einstiegsdialog liegen UEBER dem Editor statt

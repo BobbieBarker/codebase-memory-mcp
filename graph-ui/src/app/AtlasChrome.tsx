@@ -794,8 +794,10 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                             {props.truncationNote}
                         </p>
                     )}
-                    {props.splitExplain}
-                    {props.explain}
+                    {props.explain != null && <>
+                        {props.splitExplain}
+                        {props.explain}
+                    </>}
                 </main>
                 {hasSide && (
                     <>

@@ -460,4 +460,23 @@ describe('AtlasChrome', () => {
         await render(props());
         expect(testId('atlas-reader')?.querySelector('[data-testid="fake-reader"]')).not.toBeNull();
     });
+
+    it('only reserves an explanation splitter while a tool is open, preserving the reader', async () => {
+        const reader = <input data-testid="preserved-reader" defaultValue="selected source" />;
+        const next = props({ children: reader, splitExplain: <div data-testid="explanation-splitter" /> });
+        await render(next);
+        const mountedReader = testId('preserved-reader');
+        expect(testId('explanation-splitter')).toBeNull();
+
+        await render({ ...next, explain: <section data-testid="opened-tool">Flow</section> });
+        expect(testId('explanation-splitter')).not.toBeNull();
+        expect(testId('opened-tool')).not.toBeNull();
+        expect(testId('preserved-reader')).toBe(mountedReader);
+
+        await render(next);
+        expect(testId('explanation-splitter')).toBeNull();
+        expect(testId('opened-tool')).toBeNull();
+        expect(testId('preserved-reader')).toBe(mountedReader);
+        expect((mountedReader as HTMLInputElement).value).toBe('selected source');
+    });
 });
