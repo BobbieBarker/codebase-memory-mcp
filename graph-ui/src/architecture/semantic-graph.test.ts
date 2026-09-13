@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSemanticGraph, semanticEntryPoints } from './semantic-graph';
+import { buildSemanticGraph, layoutFolderHierarchy, semanticEntryPoints, type SemanticNode, type SemanticPlatform } from './semantic-graph';
 import type { GraphData, GraphNode } from '../galaxy/types';
 
 const node = (id: number, file: string, name = `symbol${id}`, status: GraphNode['status'] = 'normal'): GraphNode => ({
@@ -16,7 +16,83 @@ const fixture: GraphData = { nodes: [node(1, 'src/api/server.ts', 'start', 'entr
     { id: 5, source: 3, target: 1, type: 'CALLS' },
 ] };
 
+const containsNode = (platform: SemanticPlatform, item: SemanticNode) => Math.abs(platform.position[0] - item.position[0]) + 10 <= platform.width / 2
+    && Math.abs(platform.position[2] - item.position[2]) + 10 <= platform.depth / 2;
+const hierarchyNode = (id: string, filePath?: string, line = 1): SemanticNode => ({ id, kind: 'symbol', label: id, detail: '',
+    position: [0, 0, 0], count: 1, members: [], filePath, line });
+
+describe('source folder hierarchy layout', () => {
+    it('connects overview and dependency projections to real ancestor platforms without changing evidence', () => {
+        const input: GraphData = { ...fixture, nodes: [...fixture.nodes, node(20, 'apps/web/app.ts'), node(21, 'README.md')], total_nodes: 6 };
+        const full = buildSemanticGraph(input, { view: 'overview' });
+        expect(full.platforms?.map(platform => platform.path).sort()).toEqual(['apps', 'src']);
+        const source = full.platforms!.find(platform => platform.path === 'src')!;
+        full.nodes.filter(item => item.areaPath?.startsWith('src/')).forEach(item => expect(containsNode(source, item)).toBe(true));
+        expect(full.nodes.find(item => item.areaPath === '(root)')?.position[1]).toBeCloseTo(0.08);
+        const filtered = buildSemanticGraph(input, { view: 'dependencies', filter: 'src/store' });
+        expect(filtered.platforms?.map(platform => platform.path)).toEqual(['src']);
+        filtered.nodes.forEach(item => expect(item.position).toEqual(full.nodes.find(original => original.id === item.id)!.position));
+        filtered.edges.forEach(edge => expect(edge).toEqual(full.edges.find(original => original.id === edge.id)));
+        const capped = buildSemanticGraph(input, { view: 'overview', maxNodes: 1 });
+        expect(capped.nodes[0].position).toEqual(full.nodes.find(item => item.id === capped.nodes[0].id)!.position);
+        const imports = buildSemanticGraph(input, { view: 'dependencies', relations: ['IMPORTS'] });
+        imports.nodes.forEach(item => expect(item.position).toEqual(full.nodes.find(original => original.id === item.id)!.position));
+    });
+    it('packs nested siblings and node footprints separately while retaining ancestor containment', () => {
+        const nodes = Array.from({ length: 24 }, (_, index) => hierarchyNode(`symbol${index}`,
+            `services/service${Math.floor(index / 8)}/src/file${Math.floor(index / 3)}.ts`, index));
+        const platforms = layoutFolderHierarchy(nodes);
+        platforms.forEach((platform, index) => platforms.slice(index + 1).forEach(other => {
+            if (platform.path.startsWith(`${other.path}/`) || other.path.startsWith(`${platform.path}/`)) return;
+            expect(Math.abs(platform.position[0] - other.position[0]) >= (platform.width + other.width) / 2
+                || Math.abs(platform.position[2] - other.position[2]) >= (platform.depth + other.depth) / 2).toBe(true);
+        }));
+        for (const item of nodes) {
+            platforms.filter(platform => item.filePath!.startsWith(`${platform.path}/`)).forEach(platform => expect(containsNode(platform, item)).toBe(true));
+            const parent = platforms.find(platform => platform.path === item.filePath!.slice(0, item.filePath!.lastIndexOf('/')))!;
+            expect(item.position[1] - parent.position[1]).toBeCloseTo(0.08);
+        }
+        nodes.forEach((item, index) => nodes.slice(index + 1).forEach(other => expect(Math.hypot(item.position[0] - other.position[0], item.position[2] - other.position[2])).toBeGreaterThanOrEqual(20)));
+    });
+    it('keeps root files flat, caps real ancestor depth, and separates unknown source without inventing a path', () => {
+        const nodes = [hierarchyNode('root', 'root.ts'), hierarchyNode('deep', 'services/api/src/internal/jobs/run.ts'), hierarchyNode('unknown')];
+        const before = nodes.map(item => ({ ...item, position: undefined }));
+        const platforms = layoutFolderHierarchy(nodes);
+        expect(platforms.filter(platform => platform.path).map(platform => platform.path)).toEqual(['services', 'services/api', 'services/api/src']);
+        expect(platforms.every(platform => platform.level <= 3)).toBe(true);
+        expect(platforms.find(platform => platform.label === 'Unknown source')?.path).toBe('');
+        expect(nodes[0].position[1]).toBeCloseTo(0.08);
+        expect(nodes[1].filePath).toBe('services/api/src/internal/jobs/run.ts');
+        expect(nodes.map(item => ({ ...item, position: undefined }))).toEqual(before);
+        const reversed = nodes.map(item => ({ ...item, position: [0, 0, 0] as [number, number, number] })).reverse();
+        expect(layoutFolderHierarchy(reversed)).toEqual(platforms);
+        reversed.forEach(item => expect(item.position).toEqual(nodes.find(original => original.id === item.id)!.position));
+        expect(layoutFolderHierarchy([])).toEqual([]);
+    });
+    it('keeps direct source-folder files beside descendant area bricks inside their common source container', () => {
+        const input: GraphData = { nodes: [node(1, 'src/main.ts'), node(2, 'src/store/db.ts')], edges: [], total_nodes: 2 };
+        const model = buildSemanticGraph(input, { view: 'overview' });
+        expect(model.nodes.map(item => item.id)).toEqual(['area:src', 'area:src/store']);
+        expect(model.platforms?.map(platform => platform.path)).toEqual(['src']);
+        model.nodes.forEach(item => expect(containsNode(model.platforms![0], item)).toBe(true));
+        expect(model.edges).toEqual([]);
+    });
+});
+
 describe('semantic architecture projection', () => {
+    it('represents disconnected and inventory-only files without inventing graph evidence', () => {
+        const graph: GraphData = { nodes: [node(1, 'src/api/main.ts'), { ...node(2, 'isolated/empty.ts'), label: 'File' }], edges: [], total_nodes: 2 };
+        const knownFiles = ['src/api/main.ts', 'isolated/empty.ts', 'assets/logo.svg'];
+        const model = buildSemanticGraph(graph, { view: 'overview', knownFiles });
+        expect(model.nodes.map(node => node.id)).toEqual(['area:assets', 'area:isolated', 'area:src/api']);
+        expect(model.edges).toEqual([]);
+        const empty = buildSemanticGraph(graph, { view: 'overview', knownFiles, areaPath: 'isolated' });
+        expect(empty.nodes[0].filePath).toBe('isolated/empty.ts');
+        const missing = buildSemanticGraph(graph, { view: 'overview', knownFiles, filePath: 'assets/logo.svg' });
+        expect(missing.nodes[0]).toMatchObject({ kind: 'file', filePath: 'assets/logo.svg', members: [], count: 0 });
+        expect(missing.nodes[0].graphNode).toBeUndefined();
+        expect(buildSemanticGraph(graph, { view: 'overview', knownFiles, visibleFiles: new Set(['assets/logo.svg']) }).nodes.map(node => node.id)).toEqual(['area:assets']);
+    });
     it('preserves direction, relationship type and exact source evidence through aggregation', () => {
         const model = buildSemanticGraph(fixture, { view: 'dependencies' });
         expect(model.nodes.map(item => item.id)).toEqual(['area:src/api', 'area:src/service', 'area:src/store']);

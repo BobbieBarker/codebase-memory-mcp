@@ -160,9 +160,6 @@ export default function AtlasTree(props: AtlasTreeProps): JSX.Element {
         }
     }, [props.cursor, props.rows.length]);
 
-    const states = shownStates(props.rows);
-    const markedFolders = props.rows.some((row) => row.kind === 'dir' && coverageOf(row) !== 'indexed');
-
     return (
         <aside className="atlas-tree" data-testid="atlas-tree">
             <h2 className="atlas-tree-title">{messages.explorer.title}</h2>
@@ -249,20 +246,26 @@ export default function AtlasTree(props: AtlasTreeProps): JSX.Element {
                     );
                 })}
             </ul>
+        </aside>
+    );
+}
+
+/** Coverage metadata belongs in the Coverage workspace, separate from file navigation. */
+export function AtlasTreeIndexDetails(props: Pick<AtlasTreeProps, 'rows' | 'note' | 'noteIsAbsence' | 'truncations'>): JSX.Element {
+    const states = shownStates(props.rows);
+    const markedFolders = props.rows.some((row) => row.kind === 'dir' && coverageOf(row) !== 'indexed');
+    return <section aria-label={workspaceStrings.indexInventory}>
             {props.note.length > 0 && (
-                <details className="atlas-evidence-details" open={props.explained || props.noteIsAbsence}>
-                <summary>{workspaceStrings.coverage}</summary>
                 <p className="atlas-tree-note" data-state={props.noteIsAbsence === true ? 'absent' : 'present'}>
                     {props.note}
                 </p>
-                </details>
             )}
             {(props.truncations ?? []).map((line) => (
                 <p className="atlas-tree-note" data-state="absent" data-testid="atlas-tree-truncation" key={line}>
                     {line}
                 </p>
             ))}
-            <div className="atlas-tree-legend atlas-guidance-note" data-testid="atlas-tree-legend">
+            <div className="atlas-tree-legend" data-testid="atlas-tree-legend">
                 {/*
                   * Die Legende erklaert auch den Gutfall.
                   *
@@ -298,6 +301,5 @@ export default function AtlasTree(props: AtlasTreeProps): JSX.Element {
                     {COVERAGE_SOURCE_NOTE}
                 </span>
             </div>
-        </aside>
-    );
+    </section>;
 }

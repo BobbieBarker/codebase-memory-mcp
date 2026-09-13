@@ -10,8 +10,8 @@ it('allows first use without starting or setting up browser AI', async () => {
     const root = createRoot(host);
     const onContinue = vi.fn(), onLocalAi = vi.fn();
     try {
-        await act(async () => root.render(<WelcomePanel workspace="architecture" guidance="brief"
-            onWorkspace={vi.fn()} onGuidance={vi.fn()} onContinue={onContinue} onLocalAi={onLocalAi} />));
+        await act(async () => root.render(<WelcomePanel workspace="architecture"
+            onWorkspace={vi.fn()} onContinue={onContinue} onLocalAi={onLocalAi} />));
         expect(onLocalAi).not.toHaveBeenCalled();
         expect(document.activeElement).toBe(host.querySelector('.cbm-primary'));
         await act(async () => host.querySelector<HTMLButtonElement>('.cbm-primary')!.click());

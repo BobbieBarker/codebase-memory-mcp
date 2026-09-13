@@ -41,7 +41,7 @@ describe('Local diagnosis user boundary', () => {
         const writeText = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
         const onNavigate = vi.fn(); const onCoverage = vi.fn();
-        await act(async () => root.render(<DiagnosticsPanel project="fixture" client={fixture.client} active onClose={vi.fn()} onNavigate={onNavigate} path="src/broken.ts" onCoverage={onCoverage} />));
+        await act(async () => root.render(<DiagnosticsPanel project="fixture" client={fixture.client} active onNavigate={onNavigate} path="src/broken.ts" onCoverage={onCoverage} />));
         expect(fixture.calls).toHaveLength(0); expect(container.querySelector('textarea')).toBeNull();
         await click('Run local diagnosis');
         expect(fixture.calls.map((call) => call.tool)).toEqual(['index_status', 'check_index_coverage', 'check_index_coverage']);
@@ -69,14 +69,14 @@ describe('Local diagnosis user boundary', () => {
     });
     it('never presents a failed read as complete coverage', async () => {
         const fixture = clientFixture(); fixture.fetch.mockRejectedValue(new Error('SQLite busy'));
-        await act(async () => root.render(<DiagnosticsPanel project="fixture" client={fixture.client} active onClose={vi.fn()} onNavigate={vi.fn()} />));
+        await act(async () => root.render(<DiagnosticsPanel project="fixture" client={fixture.client} active onNavigate={vi.fn()} />));
         await click('Run local diagnosis');
         expect(container.querySelector('[role="alert"]')?.textContent).toContain('SQLite busy');
         expect(container.textContent).toContain('Completeness is unknown');
         expect(container.querySelector('textarea')).toBeNull();
     });
     it('renders shared coverage reasons and an honest empty state without refetching', async () => {
-        const fixture = clientFixture(); const props: DiagnosticsPanelProps = { project: 'fixture', client: fixture.client, active: true, onClose: vi.fn(), onNavigate: vi.fn(), coverage: buildCoverageIndex({}) };
+        const fixture = clientFixture(); const props: DiagnosticsPanelProps = { project: 'fixture', client: fixture.client, active: true, onNavigate: vi.fn(), coverage: buildCoverageIndex({}) };
         await act(async () => root.render(<DiagnosticsPanel {...props} />));
         expect(container.textContent).toContain('does not prove complete indexing');
         expect(fixture.calls).toHaveLength(0);
@@ -88,7 +88,7 @@ describe('Local diagnosis user boundary', () => {
         const fixture = clientFixture();
         vi.spyOn(fixture.client, 'indexStatusPayload').mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
         const onCoverage = vi.fn();
-        const props = { project: 'old-project', client: fixture.client, active: true, path: 'old.ts', onClose: vi.fn(), onNavigate: vi.fn(), onCoverage };
+        const props = { project: 'old-project', client: fixture.client, active: true, path: 'old.ts', onNavigate: vi.fn(), onCoverage };
         await act(async () => root.render(<DiagnosticsPanel {...props} />));
         await click('Run local diagnosis');
         await act(async () => root.render(<DiagnosticsPanel {...props} project="new-project" path="new.ts" />));

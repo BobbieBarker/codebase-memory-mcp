@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useId, useMemo, useState } from 'react';
 import type { JSX, ReactNode } from 'react';
 import type { ArchitectureBoundary, ArchitectureHotspot, ArchitectureOverviewDto } from '../core/intelligence-provider';
 import {
@@ -12,16 +12,24 @@ import RepositoryMapView, { RelationshipEvidence } from './RepositoryMap';
 import type { RepositoryMapProps } from './RepositoryMap';
 import { repositoryMap } from './repository-map';
 import SpatialArchitecture from './SpatialArchitecture';
+import RoutesArchitecture from './RoutesArchitecture';
+import type { CoverageIndex } from '../app/tree-model';
+import type { SystemArchitectureLoader } from './system-architecture-source';
+
+const SystemArchitecture = lazy(() => import('./SystemArchitecture'));
 
 export interface ArchitecturePanelProps extends Pick<RepositoryMapProps, 'graph' | 'selection' | 'selectionPanel' | 'onSelect' | 'graphNote' | 'readSource'> {
     projectName: string;
     graphGeneration?: string;
     active?: boolean;
+    coverage?: CoverageIndex;
     overview?: ArchitectureOverviewDto;
     loading?: boolean;
     error?: string;
     onRefresh?: () => void;
+    onClearSelection?: () => void;
     onProjectWalk?: () => void;
+    systemArchitectureLoader?: SystemArchitectureLoader;
     /** The declaration line is 1-based, as returned by the provider. */
     onNavigate: (filePath: string, line?: number, name?: string) => void;
 }
@@ -238,7 +246,7 @@ function Findings({ view, data, empty, onNavigate }: {
     </section>;
 }
 
-function ArchitectureWorkspace({ projectName, overview, loading = false, error, onRefresh, onProjectWalk, onNavigate, graph, selection, selectionPanel, onSelect, graphNote, graphGeneration, readSource, active = true }: ArchitecturePanelProps): JSX.Element {
+function ArchitectureWorkspace({ projectName, overview, loading = false, error, onRefresh, onProjectWalk, onNavigate, graph, selection, selectionPanel, onSelect, onClearSelection, graphNote, graphGeneration, readSource, active = true, coverage, systemArchitectureLoader }: ArchitecturePanelProps): JSX.Element {
     const storage = useMemo(browserStorage, []);
     const [config, setConfig] = useState(() => readArchitectureConfig(storage, projectName));
     const [saved, setSaved] = useState(true);
@@ -246,17 +254,18 @@ function ArchitectureWorkspace({ projectName, overview, loading = false, error, 
     // A cached summary from another project must never appear here.
     const data = overview?.projectName && overview.projectName !== projectName ? undefined : overview;
     const filtered = useMemo(() => data ? matchingArchitecture(data, config.filter) : undefined, [data, config.filter]);
-    const onGroup = (group: string) => setConfig({ view: 'dependencies', filter: group });
+    const onGroup = (group: string) => setConfig({ view: 'overview', filter: group });
     const empty = config.filter.trim() ? text.noMatches : text.noData;
     const ready = Boolean(data && filtered && !loading && !error && projectName);
-    return <section className="atlas-architecture" data-testid="atlas-architecture" aria-label={text.title} aria-busy={loading}>
-        <header className="atlas-arch-heading"><div><span className="atlas-arch-project">{projectName}</span>
-            <h1>{text.title}</h1><p>{text.subtitle}</p></div>
+    const systemView = config.view === 'structure' || config.view === 'behavior' ? config.view : undefined;
+    const SpatialView = config.view === 'routes' ? RoutesArchitecture : SpatialArchitecture;
+    return <section className="atlas-architecture" data-testid="atlas-architecture" data-system-view={systemView} aria-label={text.title} aria-busy={!systemView && loading}>
+        <header className="atlas-arch-heading"><span className="atlas-arch-project">{projectName}</span>
             <div className="repo-map-directions">{onProjectWalk && <button onClick={onProjectWalk} disabled={!projectName}>{text.importWalk}</button>}
-                {onRefresh && <button className="atlas-arch-action" onClick={onRefresh} disabled={loading || !projectName}>{text.refresh}</button>}</div>
+                {onRefresh && !systemView && <button className="atlas-arch-action" onClick={onRefresh} disabled={loading || !projectName}>{text.refresh}</button>}</div>
         </header>
         <nav className="atlas-arch-tabs" aria-label={text.navigation}>{ARCHITECTURE_VIEWS.map(view =>
-            <button className="atlas-arch-tab" key={view} aria-pressed={config.view === view} data-view={view}
+            <button className="atlas-arch-tab" key={view} aria-pressed={config.view === view || (view === 'overview' && ['dependencies', 'entryPoints'].includes(config.view))} data-view={view}
                 onClick={() => setConfig(current => ({ ...current, view }))}>{text.views[view]}</button>)}</nav>
         <div className="atlas-arch-toolbar">
             <label className="atlas-arch-filter"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="m10 10 4 4" stroke="currentColor" strokeWidth="1.4" /></svg>
@@ -265,22 +274,28 @@ function ArchitectureWorkspace({ projectName, overview, loading = false, error, 
             </label><span className="atlas-arch-saved">{saved ? text.saved : text.sessionOnly}</span>
             <button className="atlas-arch-action" onClick={() => setConfig({ ...DEFAULT_ARCHITECTURE_CONFIG })}>{text.reset}</button>
         </div>
-        {!projectName ? <Empty>{text.chooseProject}</Empty> : loading ? <div role="status"><Empty>{text.loading}</Empty></div>
+        {systemView && projectName ? <Suspense fallback={<div role="status"><Empty>Preparing system analysis…</Empty></div>}><SystemArchitecture
+            project={projectName} generation={graphGeneration} view={systemView} filter={config.filter} active={active}
+            graph={graph} onSelect={onSelect} onClearSelection={onClearSelection} onNavigate={onNavigate} loader={systemArchitectureLoader} /></Suspense> : null}
+        {!systemView && (!projectName ? <Empty>{text.chooseProject}</Empty> : loading ? <div role="status"><Empty>{text.loading}</Empty></div>
             : error ? <div role="alert" className="atlas-arch-empty" data-error="true"><p>{text.loadFailed}</p><p className="atlas-arch-error-detail">{error}</p>
                 {onRefresh && <button className="atlas-arch-action" onClick={onRefresh}>{text.retry}</button>}</div>
-                : !data ? <Empty>{text.unavailable}</Empty> : null}
-        {ready && data && graph && <div hidden={config.view === 'hotspots'}><SpatialArchitecture project={projectName} generation={graphGeneration} graph={graph} overview={data}
-            view={config.view === 'hotspots' ? 'overview' : config.view} filter={config.filter} active={active && config.view !== 'hotspots'}
-            graphNote={graphNote} onSelect={onSelect} selectionPanel={selectionPanel} onNavigate={onNavigate} onView={view => setConfig(current => ({ ...current, view }))} /></div>}
-        {ready && data && filtered && <div className="atlas-arch-content" key={`${config.view}:${config.filter}:${graphGeneration ?? ""}`} data-testid="atlas-architecture-content">
-            <details open={!graph || config.view === 'hotspots'}><summary>Source guide and complete findings</summary>
+                : !data ? <Empty>{text.unavailable}</Empty> : null)}
+        {systemView && !projectName && <Empty>{text.chooseProject}</Empty>}
+        {!systemView && ready && data && graph && <SpatialView project={projectName} generation={graphGeneration} graph={graph} overview={data}
+            view={config.view === 'dependencies' || config.view === 'structure' || config.view === 'behavior' ? 'overview' : config.view} filter={config.filter} active={active}
+            graphNote={graphNote} coverage={coverage} onSelect={onSelect} onClearSelection={onClearSelection} selectionPanel={selectionPanel} onNavigate={onNavigate} onView={view => setConfig(current => ({ ...current, view: view === 'dependencies' ? 'overview' : view }))} />}
+        {!systemView && ready && data && filtered && <div className="atlas-arch-content" key={`${config.view}:${config.filter}:${graphGeneration ?? ""}`} data-testid="atlas-architecture-content">
+            <details open={!graph}><summary>Source guide and complete findings</summary>
             {config.view === 'overview' ? <><RepositoryMapView graph={graph} graphNote={graphNote} overview={data} filter={config.filter} onNavigate={onNavigate} onSelect={onSelect} selection={selection} selectionPanel={selectionPanel} readSource={readSource} />
+                <details data-testid="architecture-dependency-details"><summary>Dependency details</summary><Dependencies data={filtered} empty={empty} onGroup={onGroup} graph={graph} onNavigate={onNavigate} /></details>
+                <details data-testid="architecture-entry-details"><summary>Entry-point source evidence</summary><Findings view="entryPoints" data={filtered} empty={empty} onNavigate={onNavigate} /></details>
                 <details><summary>{text.summaryDetails}</summary><Overview data={data} filtered={filtered} filter={config.filter} onGroup={onGroup} onNavigate={onNavigate} /></details></>
                 : config.view === 'dependencies' ? <Dependencies data={filtered} empty={empty} onGroup={onGroup} graph={graph} onNavigate={onNavigate} />
                     : <Findings view={config.view} data={filtered} empty={empty} onNavigate={onNavigate} />}
             </details>
         </div>}
-        {ready && <details className="atlas-arch-evidence"><summary>{text.evidenceSummary}</summary><p>{text.evidenceDetail}</p></details>}
+        {!systemView && ready && <details className="atlas-arch-evidence"><summary>{text.evidenceSummary}</summary><p>{text.evidenceDetail}</p></details>}
     </section>;
 }
 

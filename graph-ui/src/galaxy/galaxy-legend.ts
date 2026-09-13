@@ -15,7 +15,7 @@
  *    Label plus ein Zuschlag aus dem Grad. Diese Oberflaeche faerbt keinen
  *    Knoten selbst; sie malt, was im Layout steht.
  * 2. **Die Kantenfarben kommen aus der Tabelle, die sie malt.** Importiert aus
- *    EdgeLines.tsx, nicht abgeschrieben. Gezeigt werden nur die Typen, die im
+ *    graph/edge-style, wie EdgeLines.tsx. Gezeigt werden nur die Typen, die im
  *    geladenen Layout wirklich vorkommen: eine Legende mit zwanzig Kantenarten
  *    fuer einen Graphen mit dreien ist eine Legende fuer ein anderes Bild.
  *    Seit W9 steht neben jeder Art ihre Zahl, GEZAEHLT in der geladenen
@@ -45,7 +45,7 @@
  *    weggefallen ist: gestrichen wurde Wiederholung, nicht Inhalt.
  */
 
-import { DEFAULT_EDGE_COLOR, EDGE_TYPE_COLORS } from './EdgeLines';
+import { edgeColor } from '../graph/edge-style';
 import { HIERARCHY_DEFAULT_COLOR } from './hierarchy-layout';
 import type { GraphData } from './types';
 
@@ -105,7 +105,7 @@ export interface EdgeKind {
 
 /** Die Farbe eines Kantentyps, so wie EdgeLines sie malt. */
 export function edgeColorFor(type: string): string {
-    return EDGE_TYPE_COLORS[type] ?? DEFAULT_EDGE_COLOR;
+    return edgeColor(type);
 }
 
 /**
@@ -215,7 +215,8 @@ export function galaxyLegendEntries(data: GraphData | undefined): LegendEntry[] 
         swatches.length === 0
             ? 'one colour per edge type, from the table that draws the lines. The types appear once a layout is loaded.'
             : 'one colour per edge type, from the table that draws the lines. Counted in this '
-                + 'layout, most frequent first. Click a kind to take it out; it stays here, dimmed.';
+                + 'layout, most frequent first. A soft pulse follows known directed relations from source to target. '
+                + 'Click a kind to take it out; it stays here, dimmed.';
     return [
         {
             key: 'edge-color',

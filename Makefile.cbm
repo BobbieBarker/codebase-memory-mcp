@@ -318,13 +318,13 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c
+STORE_SRCS = src/store/store.c src/store/architecture_projection.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
 
 # MCP server module (new)
-MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c
+MCP_SRCS = src/mcp/mcp.c src/mcp/index_supervisor.c src/mcp/compact_out.c src/mcp/architecture_jobs.c
 
 # Shared MCP daemon coordination and local transport
 DAEMON_SRCS = \
@@ -563,6 +563,7 @@ TEST_STORE_SRCS = \
     tests/test_store_edges.c \
     tests/test_store_search.c \
     tests/test_store_arch.c \
+    tests/test_architecture_projection.c \
     tests/test_store_bulk.c \
     tests/test_store_pragmas.c \
     tests/test_store_checkpoint.c \

@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
 import type { JSX } from 'react';
-import type { Workspace, Guidance } from './workspace-strings';
+import type { Workspace } from './workspace-strings';
 import { workspaceStrings as s } from './workspace-strings';
 
 interface Props {
-    workspace: Workspace; guidance: Guidance;
-    onWorkspace: (workspace: Workspace) => void; onGuidance: (guidance: Guidance) => void;
+    workspace: Workspace;
+    onWorkspace: (workspace: Workspace) => void;
     onContinue: () => void; onLocalAi: () => void;
 }
 export default function WelcomePanel(props: Props): JSX.Element {
@@ -33,11 +33,6 @@ export default function WelcomePanel(props: Props): JSX.Element {
                     <strong>{item.label}</strong><span>{s.descriptions[item.id]}</span>
                 </button>)}
             </div>
-            <label className="cbm-welcome-guidance">{s.guidance}
-                <select value={props.guidance} onChange={(event) => props.onGuidance(event.target.value as Guidance)}>
-                    <option value="brief">{s.brief}</option><option value="explained">{s.explained}</option>
-                </select>
-            </label>
             <p className="cbm-welcome-note">{s.changeLater}</p>
             <footer><button type="button" onClick={props.onLocalAi}>{s.localAi}</button>
                 <button type="button" className="cbm-primary" autoFocus onClick={props.onContinue}>{s.start}</button></footer>

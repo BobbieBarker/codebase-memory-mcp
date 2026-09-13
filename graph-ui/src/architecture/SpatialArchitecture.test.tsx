@@ -8,7 +8,7 @@ import type { ArchitectureSceneProps } from './ArchitectureScene';
 import type { GraphData, GraphNode } from '../galaxy/types';
 import type { ArchitectureOverviewDto } from '../core/intelligence-provider';
 
-vi.mock('./ArchitectureScene', () => ({ ArchitectureScene: (props: ArchitectureSceneProps) => <div data-testid="scene" data-active={String(props.active)}>{props.model.nodes.map(node => <button key={node.id} data-node={node.id} onClick={() => props.onSelect(node.id)}>{node.label}</button>)}</div> }));
+vi.mock('./ArchitectureScene', () => ({ ArchitectureScene: (props: ArchitectureSceneProps) => <div data-testid="scene" data-active={String(props.active)}>{props.model.nodes.map(node => <button key={node.id} data-node={node.id} onClick={() => props.onSelect(node.id)}>{node.label}</button>)}<button aria-label="Empty background" onClick={props.onClearSelection} /></div> }));
 vi.mock('./route-graph-source', () => ({ loadRouteGraph: vi.fn(async () => ({ relationships: [], truncated: false, warnings: [] })) }));
 
 const node: GraphNode = { id: 1, label: 'Function', name: 'start', qualified_name: 'sample.start', file_path: 'src/api/main.ts', start_line: 12, end_line: 30, status: 'entry', x: 0, y: 0, z: 0, size: 1, color: '' };
@@ -37,6 +37,16 @@ it('drills inferred areas to files and symbols before enabling real-node impact 
     expect(host.textContent).toContain('Analyze selected symbol');
     await click('Open source'); expect(onNavigate).toHaveBeenCalledWith('src/api/main.ts', 12, 'start');
 });
+it('returns from a file symbol to the repository map on empty background', async () => {
+    const clear = vi.fn();
+    await act(async () => root.render(<SpatialArchitecture project="sample" graph={graph} overview={overview} view="overview" filter="" active onSelect={vi.fn()} onClearSelection={clear} onNavigate={vi.fn()} onView={vi.fn()} selectionPanel={<button>Analyze selected symbol</button>} />));
+    await click('src/api'); await click('Open area →'); await click('src/api/main.ts'); await click('Open file symbols →'); await click('start');
+    expect(host.textContent).toContain('Analyze selected symbol');
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Empty background"]')!.click());
+    expect(host.querySelector('[data-testid="scene"]')?.textContent).toContain('src/api');
+    expect(host.textContent).not.toContain('Analyze selected symbol');
+    expect(clear).toHaveBeenCalledOnce();
+});
 it('passes hidden-workspace suspension to the scene and preserves the scene across view switches', async () => {
     const props = { project: 'sample', graph, overview, filter: '', onNavigate: vi.fn(), onView: vi.fn() };
     await act(async () => root.render(<SpatialArchitecture {...props} view="overview" active />));
@@ -60,6 +70,32 @@ it('cancels a route request on generation change and ignores its late result', a
 it('does not load route evidence while the workspace is hidden', async () => {
     await act(async () => root.render(<SpatialArchitecture project="sample" graph={graph} overview={overview} view="routes" filter="" active={false} onNavigate={vi.fn()} onView={vi.fn()} />));
     expect(loadRouteGraph).not.toHaveBeenCalled();
+});
+it('explains the brick encodings and allows a uniform-height structural view', async () => {
+    await act(async () => root.render(<SpatialArchitecture project="sample" graph={graph} overview={overview} view="overview" filter="" active onNavigate={vi.fn()} onView={vi.fn()} />));
+    const height = host.querySelector<HTMLSelectElement>('select[aria-label="Brick height"]');
+    expect(height).not.toBeNull();
+    expect(height?.value).toBe('lines');
+    expect(height?.selectedOptions[0].textContent).toBe('Source size');
+    expect(host.querySelector('select[aria-label="Brick color"]')).not.toBeNull();
+    await act(async () => { height!.value = 'uniform'; height!.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(height?.value).toBe('uniform');
+    expect(height?.selectedOptions[0].textContent).toBe('Uniform');
+});
+it('keeps isolated and coverage-only files reachable through the inventory and visibility filter', async () => {
+    const coverage = { records: new Map([['assets/logo.svg', { path: 'assets/logo.svg', kind: 'file' as const, state: 'not-indexed' as const, reason: 'excluded type', sources: ['coverage'] }]]),
+        truncations: [], counts: { partial: 0, skipped: 0, notIndexedDirs: 0, notIndexedFiles: 1, scopeEntries: 1 } };
+    const onNavigate = vi.fn();
+    await act(async () => root.render(<SpatialArchitecture project="sample" graph={graph} overview={{ ...overview, files: ['src/api/main.ts', 'empty/unused.ts'] }} coverage={coverage} view="overview" filter="" active onNavigate={onNavigate} onView={vi.fn()} />));
+    expect(host.textContent).toContain('File inventory · 3 known files');
+    expect(host.textContent).toContain('assets/logo.svg');
+    const files = host.querySelector<HTMLSelectElement>('select[aria-label="File visibility"]')!;
+    await act(async () => { files.value = 'connected'; files.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(host.querySelector('.spatial-inventory-list')?.textContent).toBe('');
+    await act(async () => { files.value = 'all'; files.dispatchEvent(new Event('change', { bubbles: true })); });
+    const read = host.querySelector<HTMLButtonElement>('button[aria-label="Read assets/logo.svg"]')!;
+    await act(async () => read.click());
+    expect(onNavigate).toHaveBeenCalledWith('assets/logo.svg', 1);
 });
 it('keeps the chosen entry identity across reindexing when numeric IDs are reused', async () => {
     const second = { ...node, id: 2, name: 'other', qualified_name: 'sample.other' };

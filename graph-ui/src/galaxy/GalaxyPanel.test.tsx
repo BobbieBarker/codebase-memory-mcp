@@ -297,8 +297,8 @@ describe('GalaxyPanel und die Legende', () => {
             .toEqual(['CALLS', 'WHAT_IS_THIS']);
         // CALLS steht in der Tabelle, WHAT_IS_THIS nicht: der zweite bekommt
         // die Vorgabefarbe, die auch die Szene malt.
-        expect(swatches[0]?.getAttribute('data-color')).toBe('#1DA27E');
-        expect(swatches[1]?.getAttribute('data-color')).toBe('#1C8585');
+        expect(swatches[0]?.getAttribute('data-color')).toBe('#579fc7');
+        expect(swatches[1]?.getAttribute('data-color')).toBe('#84939d');
     });
 
     /*

@@ -118,15 +118,14 @@ import type { JSX, KeyboardEvent } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import AtlasChrome, { CLOSE_COMMAND_SEARCH_EVENT, OPEN_COMMAND_SEARCH_EVENT } from './app/AtlasChrome';
+import { AtlasTreeIndexDetails } from './app/AtlasTree';
 import ArchitecturePanel from './architecture/ArchitecturePanel';
 import SelectionContextPanel from './why/SelectionContext';
 import ChangeAnalysisWorkspace from './impact/ChangeAnalysisWorkspace';
 import type { SelectionImpactTarget } from './impact/selection-impact';
 import SourceEvidenceDrawer, { fileQualifiedName, type SourceEvidenceTarget } from './architecture/SourceEvidenceDrawer';
 import { setUiLogProject } from './app/ui-log-install';
-import DaemonAlerts from './diagnostics/DaemonAlerts';
 import DiagnosticsPanel from './diagnostics/DiagnosticsPanel';
-import { useDaemonLogFeed } from './diagnostics/useDaemonLogFeed';
 import { resolveRepositorySelection, useRepositorySnapshot } from './architecture/repository-source';
 import ActivityPanel from './agents/ActivityPanel';
 import WelcomePanel from './app/WelcomePanel';
@@ -748,9 +747,9 @@ export default function App(): JSX.Element {
     const [workspace, setWorkspace] = useState<Workspace>(() => {
         try {
             const requested = new URLSearchParams(window.location.search).get('workspace');
-            if (requested === 'explore' || requested === 'galaxy' || requested === 'architecture' || requested === 'agents' || requested === 'system') return requested;
+            if (requested === 'explore' || requested === 'galaxy' || requested === 'architecture' || requested === 'agents' || requested === 'coverage' || requested === 'system') return requested;
             const saved = localStorage.getItem('cbm.workspace');
-            return saved === 'explore' || saved === 'galaxy' || saved === 'agents' || saved === 'system' ? saved : 'architecture';
+            return saved === 'explore' || saved === 'galaxy' || saved === 'agents' || saved === 'coverage' || saved === 'system' ? saved : 'architecture';
         } catch { return 'architecture'; }
     });
     const changeWorkspace = (value: Workspace): void => {
@@ -764,6 +763,7 @@ export default function App(): JSX.Element {
         try { return localStorage.getItem('cbm.workspace.setup') !== 'done'; } catch { return false; }
     });
     const [browserAiOpen, setBrowserAiOpen] = useState(false);
+    const [codeDetailsOpen, setCodeDetailsOpen] = useState(false);
     const [readerSelection, setReaderSelection] = useState<ReaderSelection>();
     const [pinnedCode, setPinnedCode] = useState<SelectedCodeSnapshot>();
     const [fileSymbols, setFileSymbols] = useState<FileSymbolResult & { project: string; path: string; status: 'loading' | 'ready' | 'error' }>({ project: '', path: '', symbols: [], message: '', status: 'ready' });
@@ -776,17 +776,10 @@ export default function App(): JSX.Element {
         setWhyDismissed(true);
         try { localStorage.setItem('cbm.workspace.setup', 'done'); } catch { /* Session-only preference. */ }
     };
-    const [guidance, setGuidance] = useState<Guidance>(() => {
-        try { return localStorage.getItem('cbm.explanation-depth') === 'explained' ? 'explained' : 'brief'; }
-        catch { return 'brief'; }
-    });
-    const changeGuidance = (value: Guidance): void => {
-        setGuidance(value);
-        try { localStorage.setItem('cbm.explanation-depth', value); } catch { /* Session-only preference. */ }
-    };
+    const guidance: Guidance = 'brief';
     const client = useMemo(() => new RpcIntelligenceClient({}), []);
     const api = useMemo(() => new AtlasApi({}), []);
-    const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+    const [diagnosticsPath, setDiagnosticsPath] = useState<string>();
 
     /*
      * What the projects panel asks the server. The list comes over /rpc like
@@ -816,9 +809,6 @@ export default function App(): JSX.Element {
     }, []);
 
     const [project, setProject] = useState('');
-    const [logScopeChoice, setLogScopeChoice] = useState<{ project: string; scope: 'project' | 'daemon' }>();
-    const logScope = logScopeChoice?.project === project ? logScopeChoice.scope : 'project';
-    const daemonLogFeed = useDaemonLogFeed(api, Boolean(project), 3000, logScope === 'project' ? project : undefined);
     const [projectDetail, setProjectDetail] = useState('resolving project ...');
     const [serverOk, setServerOk] = useState<boolean | undefined>(undefined);
     const [counts, setCounts] = useState<{ nodes?: number; edges?: number }>({});
@@ -4527,6 +4517,11 @@ export default function App(): JSX.Element {
         if (!qualifiedName) throw new Error(workspaceText.sourceOutsideSnapshot);
         return client.getCodeSnippet(project, qualifiedName, { startLine, maxLines });
     }, [client, project, repositoryReading.snapshot]);
+    const clearGraphSelection = () => {
+        setGalaxySelection(undefined);
+        setGalaxySelectionProject('');
+        setChatGraphSelection(undefined);
+    };
     const inspectorImpactTarget = inspector.filePath ? { filePath: inspector.filePath,
         qualifiedName: inspector.symbol?.qualifiedName, id: inspector.symbol ? inspectorNode?.id : undefined,
         name: inspector.symbol?.name, line: inspectorNode?.start_line } : undefined;
@@ -4572,7 +4567,6 @@ export default function App(): JSX.Element {
         selectionContext={<SelectionContextPanel graph={evidenceGraph}
             selected={inspector.symbol ? inspectorNode : undefined} path={inspector.filePath}
             agents={agents.state} onNavigate={navigateEvidence} />}
-        impact={<button className="atlas-analysis-action" disabled={!inspector.filePath} onClick={() => openSelectionImpact(inspectorImpactTarget)}>{workspaceText.selectionImpact} →</button>}
         pinned={pinnedCode?.project === project}
         onTogglePin={() => setPinnedCode(current => current?.project === project ? undefined : { ...liveCode,
             selection: liveCode.selection ? { ...liveCode.selection } : undefined })}
@@ -4585,6 +4579,7 @@ export default function App(): JSX.Element {
     const galaxy = (
         <GalaxyPanel
             project={project}
+            onClearSelection={clearGraphSelection}
             selectionPanel={workspace === 'galaxy' ? mapSelectionPanel : undefined}
             visible={workspace === 'galaxy' || (workspace === 'explore' && galaxyOn)}
             workspaceExpanded={workspace === 'galaxy'}
@@ -4788,35 +4783,33 @@ export default function App(): JSX.Element {
     const clearAttachment = (id: string): void => {
         setChatAttachment(current => current?.id === id ? undefined : current);
     };
-    const clearGraphSelection = (id: string): void => {
+    const clearChatGraphSelection = (id: string): void => {
         setChatGraphSelection(current => current?.id === id ? undefined : current);
     };
 
     return (
         <AtlasChrome
-            workspaceStatus={<DaemonAlerts key={`${project}:${logScope}`} project={project} scope={logScope}
-                onScopeChange={scope => setLogScopeChoice({ project, scope })} reading={daemonLogFeed} coverage={coverage} coverageKnown={coverageAsked} coverageError={coverageError} onDiagnose={() => setDiagnosticsOpen(true)} />}
             workspace={workspace}
             projectSwitcher={<ProjectSwitcher currentProject={project} listProjects={projectsSource.listProjects}
                 onSelectProject={openProject} onManageProjects={() => setProjectsOpen(true)} />}
-            onWorkspaceChange={changeWorkspace}
+            onWorkspaceChange={value => { setDiagnosticsPath(undefined); changeWorkspace(value); }}
             onOpenBrowserAi={() => setBrowserAiOpen(open => !open)}
             onOpenSystem={() => changeWorkspace('system')}
             daemonState={serverOk === undefined ? 'checking' : serverOk ? 'connected' : 'disconnected'}
             chatOpen={browserAiOpen}
             chatDock={<BrowserChatDock open={browserAiOpen} onClose={() => setBrowserAiOpen(false)}
-                pendingContext={chatGraphSelection} onContextConsumed={clearGraphSelection} onContextRemoved={clearGraphSelection}
+                showCollapsed={workspace === 'explore'} onOpen={() => setBrowserAiOpen(true)}
+                pendingContext={chatGraphSelection} onContextConsumed={clearChatGraphSelection} onContextRemoved={clearChatGraphSelection}
                 context={browserGraphContext(inspector.ir, project, inspector.filePath, inspector.symbol ? workspacePathOf(inspector.symbol.uri) : '')}
                 attachment={chatAttachment} onAttachmentConsumed={clearAttachment} onAttachmentRemoved={clearAttachment} />}
             readerActions={<>
                 <button type="button" disabled={!liveSelection} aria-keyshortcuts="Control+Shift+L Meta+Shift+L"
                     onClick={() => { if (liveSelection) attachSelection(liveSelection); }}>{workspaceText.askSelection}</button>
+                <button type="button" disabled={!inspector.filePath} onClick={() => openSelectionImpact(inspectorImpactTarget)}>{workspaceText.assessImpact}</button>
+                <button type="button" aria-expanded={codeDetailsOpen} onClick={() => setCodeDetailsOpen(open => !open)}>{workspaceText.codeDetails}</button>
             </>}
-            globalOverlay={<><DiagnosticsPanel project={project} client={client} coverage={coverageAsked ? coverage : undefined}
-                coverageError={coverageError} active={diagnosticsOpen} onClose={() => setDiagnosticsOpen(false)}
-                path={(workspace === 'architecture' || workspace === 'galaxy') ? activeGalaxySelection?.file_path : activePath || undefined}
-                onNavigate={path => { setDiagnosticsOpen(false); navigateEvidence(path); }}
-                onCoverage={reading => { setCoverage(reading.index); setCoverageMeta({ ...reading.answer.metadata }); setCoverageAsked(true); setCoverageError(''); setOverviewRevision(value => value + 1); }} />
+            readerDetails={codeDetailsOpen ? selectedCode : undefined}
+            globalOverlay={<>
                 {(impactOpen || analysisSelection?.project === project) && <div className="atlas-analysis-overlay" role="dialog" aria-label={workspaceText.changeAnalysis} onKeyDown={event => {
                     event.stopPropagation();
                     if (event.key === 'Escape') { setAnalysisSelection(undefined); if (impactOpen) collapseExplain(); }
@@ -4824,12 +4817,16 @@ export default function App(): JSX.Element {
                     selectedTarget={analysisSelection?.project === project ? analysisSelection.target : (workspace === 'architecture' || workspace === 'galaxy') ? mapImpactTarget : inspectorImpactTarget}
                     initialMode={analysisSelection?.project === project ? 'selection' : 'worktree'} expectedGeneration={repositoryReading.snapshot?.generation}
                     onOpenSource={target => navigateEvidence(target.filePath, target.line, target.name)}
-                    onDiagnose={() => setDiagnosticsOpen(true)} onClose={() => { setAnalysisSelection(undefined); if (impactOpen) collapseExplain(); }} /></div>}
+                    onDiagnose={() => {
+                        setDiagnosticsPath((workspace === 'architecture' || workspace === 'galaxy') ? activeGalaxySelection?.file_path : activePath || undefined);
+                        setAnalysisSelection(undefined); if (impactOpen) collapseExplain();
+                        changeWorkspace('coverage');
+                    }} onClose={() => { setAnalysisSelection(undefined); if (impactOpen) collapseExplain(); }} /></div>}
                 {sourceEvidence?.project === project && <SourceEvidenceDrawer key={`${project}:${sourceEvidence.target.filePath}:${sourceEvidence.target.line ?? 1}`}
                     project={project} target={sourceEvidence.target} graph={evidenceGraph} client={client}
                     onClose={() => setSourceEvidence(undefined)} onExplore={exploreEvidence} />}
-                {welcomeOpen && <WelcomePanel workspace={workspace} guidance={guidance}
-                onWorkspace={changeWorkspace} onGuidance={changeGuidance} onContinue={finishSetup}
+                {welcomeOpen && <WelcomePanel workspace={workspace}
+                onWorkspace={changeWorkspace} onContinue={finishSetup}
                 onLocalAi={() => { finishSetup(); setBrowserAiOpen(true); }} />}
                 {projectsOpen && <ProjectsPanel project={project} source={projectsSource}
                     onOpenProject={openProject} onClose={() => setProjectsOpen(false)} />}
@@ -4845,10 +4842,11 @@ export default function App(): JSX.Element {
                     onClose={() => setSettingsOpen(false)} />}
             </>}
             guidance={guidance}
-            onGuidanceChange={changeGuidance}
             workspacePanel={<>
                 <div hidden={workspace !== 'architecture'}>
                 <ArchitecturePanel projectName={project} overview={overview} active={workspace === 'architecture'}
+                    onClearSelection={clearGraphSelection}
+                    coverage={coverageAsked && coverageMeta.generation === repositoryReading.snapshot?.generation ? coverage : undefined}
                     readSource={readMapSource}
                     graph={repositoryReading.snapshot} graphGeneration={repositoryReading.snapshot?.generation} selection={activeGalaxySelection} selectionPanel={mapSelectionPanel}
                     graphNote={repositoryReading.error ?? (repositoryReading.snapshot
@@ -4869,6 +4867,14 @@ export default function App(): JSX.Element {
                     <SystemWorkspace api={api} project={project} active={workspace === 'system'} version={ATLAS_VERSION}
                         onOpenProjects={() => setProjectsOpen(true)} />
                 </div>
+                <div hidden={workspace !== 'coverage'}>
+                    <DiagnosticsPanel project={project} client={client} coverage={coverageAsked ? coverage : undefined}
+                        coverageError={coverageError} active={workspace === 'coverage'} path={diagnosticsPath}
+                        indexDetails={<AtlasTreeIndexDetails rows={rows} note={treeNoteParts.join('; ')}
+                            noteIsAbsence={treeError.length > 0 || coverageError.length > 0 || !project} truncations={coverage.truncations} />}
+                        onNavigate={path => { changeWorkspace('explore'); navigateEvidence(path); }}
+                        onCoverage={reading => { setCoverage(reading.index); setCoverageMeta({ ...reading.answer.metadata }); setCoverageAsked(true); setCoverageError(''); setOverviewRevision(value => value + 1); }} />
+                </div>
             </>}
             version={ATLAS_VERSION}
             buildSuffix={ATLAS_BUILD_SUFFIX}
@@ -4877,7 +4883,7 @@ export default function App(): JSX.Element {
             onSelectTab={openFile}
             onCloseTab={closeTab}
             tree={{
-                explained: guidance === 'explained',
+                explained: false,
                 projectName: project.length > 0 ? project : messages.app.noProject,
                 rows,
                 cursor,
@@ -4918,7 +4924,6 @@ export default function App(): JSX.Element {
             }
             menus={menus}
             status={status}
-            selectionInspector={selectedCode}
             galaxy={galaxy}
             zones={{
                 leftWidth: shownZones.leftWidth,

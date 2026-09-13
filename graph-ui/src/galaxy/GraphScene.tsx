@@ -650,6 +650,8 @@ function IdleAutoRotate({
 
 /* Main scene */
 
+import { useGraphBackgroundReset } from '../graph/useGraphBackgroundReset';
+
 interface GraphSceneProps {
     /* False pauses the render loop (hidden-but-mounted panel). */
     active?: boolean;
@@ -727,6 +729,7 @@ export function GraphScene({
     const [hovered, setHovered] = useState<GraphNode | null>(null);
     const [hoveredShadow, setHoveredShadow] = useState<CoverageShadowNode | null>(null);
     const controlsRef = useRef<OrbitControlsImpl | null>(null);
+    const background = useGraphBackgroundReset(() => { setHovered(null); setHoveredShadow(null); onBackgroundClick?.(); });
     const flat = projection === 'flat';
     const sceneNodes = useMemo(() => coverageShadow ? [...data.nodes, ...coverageShadow.nodes] : data.nodes, [data.nodes, coverageShadow]);
     const onCodeHover = useCallback((node: GraphNode | null) => {
@@ -817,6 +820,7 @@ export function GraphScene({
 
     return (
         <Canvas
+            {...background}
             frameloop={frameloop}
             camera={{ position: [0, 0, 800], fov: GRAPH_CAMERA_FOV, near: 0.1, far: 100000 }}
             style={{ background: '#0D0F12' }}
@@ -826,7 +830,6 @@ export function GraphScene({
                 alpha: false,
                 powerPreference: 'high-performance',
             }}
-            onPointerMissed={onBackgroundClick}
         >
             <color attach="background" args={['#0D0F12']} />
             <ambientLight intensity={0.5} />
@@ -841,6 +844,7 @@ export function GraphScene({
 
             {drawEdges && (
                 <EdgeLines
+                    active={active}
                     nodes={data.nodes}
                     edges={data.edges}
                     highlightedIds={highlightedIds}

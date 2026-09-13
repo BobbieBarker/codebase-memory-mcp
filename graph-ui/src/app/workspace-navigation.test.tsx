@@ -29,7 +29,7 @@ it('offers the Galaxy workspace and reports the selected task', async () => {
         workspace: 'explore', onWorkspaceChange,
     }} />));
     const tabs = [...host.querySelectorAll<HTMLButtonElement>('[data-workspace-tab]')];
-    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Architecture', 'Agents', 'System']);
+    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Architecture', 'Agents', 'Coverage', 'System']);
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
     await act(async () => tabs[1].click());
     expect(onWorkspaceChange).toHaveBeenCalledWith('galaxy');
@@ -121,7 +121,7 @@ it('hides selected-code context outside Explore without losing its state', async
     const inspector = <input aria-label="Pinned code context" defaultValue="keep context" />;
     await act(async () => root.render(<AtlasChrome {...props} selectionInspector={inspector} chatOpen workspace="explore" />));
     const panel = host.querySelector('[aria-label="Pinned code context"]');
-    for (const workspace of ['galaxy', 'architecture', 'agents', 'system'] as const) {
+    for (const workspace of ['galaxy', 'architecture', 'agents', 'coverage', 'system'] as const) {
         await act(async () => root.render(<AtlasChrome {...props} selectionInspector={inspector} chatOpen workspace={workspace} />));
         expect(host.querySelector('[aria-label="Pinned code context"]')).toBe(panel);
         expect(panel?.closest('[hidden]')).not.toBeNull();
@@ -201,18 +201,11 @@ it('keeps the reader mounted while showing a different workspace', async () => {
     expect(host.querySelector('[data-testid="atlas-exploration-workspace"]')?.hasAttribute('hidden')).toBe(true);
 });
 
-it('changes explanation depth separately from the workspace', async () => {
-    const onGuidanceChange = vi.fn();
-    await act(async () => root.render(<AtlasChrome {...makeProps()} {...{
-        workspace: 'explore', onWorkspaceChange: vi.fn(), guidance: 'brief', onGuidanceChange,
-    }} />));
-    const choice = host.querySelector<HTMLSelectElement>('[aria-label="Explanation depth"]');
-    expect(choice).not.toBeNull();
-    await act(async () => {
-        choice!.value = 'explained';
-        choice!.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    expect(onGuidanceChange).toHaveBeenCalledWith('explained');
+it('keeps tools and explanation-depth controls out of the header', async () => {
+    await act(async () => root.render(<AtlasChrome {...makeProps()} workspace="explore" />));
+    const header = host.querySelector('[data-testid="atlas-header"]')!;
+    expect(header.querySelector('.atlas-tools-menu')).toBeNull();
+    expect(header.querySelector('[aria-label="Explanation depth"]')).toBeNull();
 });
 
 it('keeps pending results visible until activation succeeds and refocuses an open search', async () => {
@@ -228,4 +221,25 @@ it('keeps pending results visible until activation succeeds and refocuses an ope
     expect(document.activeElement).toBe(input);
     await act(async () => window.dispatchEvent(new Event('cbm:close-command-search')));
     expect(dialog.open).toBe(false);
+});
+
+
+it('keeps Explorer graph and chat draft mounted when chat folds', async () => {
+    const props = makeProps();
+    const galaxy = <section className="atlas-galaxy"><canvas /></section>;
+    const chat = <input aria-label="Folded chat draft" defaultValue="keep my question" />;
+    const render = (chatOpen: boolean) => root.render(<AtlasChrome {...props} workspace="explore" galaxy={galaxy} chatDock={chat} chatOpen={chatOpen} />);
+    await act(async () => render(false));
+    const canvas = host.querySelector('canvas');
+    const draft = host.querySelector('[aria-label="Folded chat draft"]');
+    expect(canvas?.closest('.atlas-chat-column')?.hasAttribute('hidden')).toBe(false);
+    expect(canvas?.closest('[hidden]')).toBeNull();
+    expect(host.querySelector('[data-testid="atlas-split-chat-graph"]')).toBeNull();
+    await act(async () => render(true));
+    expect(host.querySelector('canvas')).toBe(canvas);
+    expect(host.querySelector('[data-testid="atlas-split-chat-graph"]')).not.toBeNull();
+    await act(async () => render(false));
+    expect(host.querySelector('canvas')).toBe(canvas);
+    expect(host.querySelector('[aria-label="Folded chat draft"]')).toBe(draft);
+    expect(canvas?.closest('[hidden]')).toBeNull();
 });

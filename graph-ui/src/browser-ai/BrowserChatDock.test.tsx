@@ -58,7 +58,41 @@ describe('persistent local browser chat', () => {
         expect(container.querySelector('pre')?.textContent).toBe(selection.text);
         expect(container.querySelectorAll('option')).toHaveLength(BROWSER_MODELS.length);
         expect(container.textContent).toContain('No model downloads automatically');
-        expect(container.textContent).toContain('Session only');
+        expect(container.querySelector('.cbm-chat-settings h3')?.textContent).toBe('Enable chat');
+        expect(container.querySelector('[role="log"]')).toBeNull();
+        expect(container.querySelector('textarea')).toBeNull();
+    });
+
+    it('offers a compact enable action without starting a download or consuming selected code', async () => {
+        const { props } = fixture(); const onOpen = vi.fn();
+        await render({ ...props, open: false, showCollapsed: true, onOpen, attachment: selection });
+        expect(container.querySelector('aside')?.hidden).toBe(false);
+        expect(container.querySelector('form')).toBeNull();
+        expect(container.querySelector('select')).toBeNull();
+        await click('Enable chat');
+        expect(onOpen).toHaveBeenCalledOnce();
+        expect(props.createRuntime).not.toHaveBeenCalled();
+        expect(props.onAttachmentConsumed).not.toHaveBeenCalled();
+        await render({ ...props, showCollapsed: true, onOpen, attachment: selection });
+        expect(button('Download & load').disabled).toBe(false);
+        expect(container.querySelector('pre')?.textContent).toBe(selection.text);
+        expect(props.createRuntime).not.toHaveBeenCalled();
+    });
+
+    it('keeps an active answer and draft when only the collapsed header is visible', async () => {
+        const { props, runtime } = fixture(); const onOpen = vi.fn(); const answer = deferred<string>();
+        runtime.chat.mockReturnValueOnce(answer.promise);
+        await render({ ...props, showCollapsed: true, onOpen });
+        await click('Download & load'); await type('Explain'); await click('Send ↑'); await type('Next question');
+        await render({ ...props, open: false, showCollapsed: true, onOpen });
+        expect(container.querySelector('[role="log"]')).toBeNull();
+        await act(async () => answer.resolve('Finished while folded.'));
+        await click('Open chat'); expect(onOpen).toHaveBeenCalledOnce();
+        await render({ ...props, showCollapsed: true, onOpen });
+        expect(container.textContent).toContain('Finished while folded.');
+        expect(container.querySelector('textarea')?.value).toBe('Next question');
+        expect(runtime.dispose).not.toHaveBeenCalled();
+        expect(props.createRuntime).toHaveBeenCalledOnce();
     });
 
     it('retains draft, history and loaded model when the dock is collapsed', async () => {
@@ -151,7 +185,8 @@ describe('persistent local browser chat', () => {
         await render(props); await click('Download & load'); await click('Stop download');
         await act(async () => prepare.resolve());
         expect(runtime.dispose).toHaveBeenCalledOnce(); expect(container.querySelector('.cbm-chat-status')?.textContent).toBe('Off');
-        expect(button('Send ↑').disabled).toBe(true);
+        expect(container.querySelector('textarea')).toBeNull();
+        expect(button('Download & load').disabled).toBe(false);
     });
 
     it('unloads and deletes cached files separately while preserving the conversation', async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { loadCoverage, loadPathCoverage, type CoverageReading } from '../app/coverage-source';
 import type { CoverageIndex } from '../app/tree-model';
 import type { RpcIntelligenceClient } from '../provider/rpc-client';
@@ -11,14 +11,14 @@ export interface DiagnosticsPanelProps {
     coverage?: CoverageIndex | null;
     coverageError?: string | null;
     active: boolean;
-    onClose: () => void;
     path?: string;
+    indexDetails?: ReactNode;
     onNavigate: (path: string) => void;
     /** App can update its shared coverage reading from the same diagnosis. */
     onCoverage?: (reading: CoverageReading) => void;
 }
 
-export default function DiagnosticsPanel({ project, client, coverage, coverageError, active, onClose, path, onNavigate, onCoverage }: DiagnosticsPanelProps) {
+export default function DiagnosticsPanel({ project, client, coverage, coverageError, active, path, indexDetails, onNavigate, onCoverage }: DiagnosticsPanelProps) {
     const [diagnosis, setDiagnosis] = useState<LocalDiagnosis | null>(null);
     const [report, setReport] = useState('');
     const [busy, setBusy] = useState(false);
@@ -62,8 +62,8 @@ export default function DiagnosticsPanel({ project, client, coverage, coverageEr
         anchor.click(); URL.revokeObjectURL(url); setStatus('Edited report downloaded locally. Nothing was sent.');
     };
     if (!active) return null;
-    return <section className="diagnostics-panel" role="dialog" aria-label="Index coverage diagnosis" data-testid="diagnostics-panel">
-        <header><div><p className="diagnostics-eyebrow">LOCAL EVIDENCE</p><h2>Index coverage diagnosis</h2><p><code>{project}</code>{path && <> · Selected <code>{path}</code></>}</p></div><button type="button" onClick={onClose}>Close diagnosis</button></header>
+    return <section className="diagnostics-panel" aria-label="Coverage" data-testid="diagnostics-panel">
+        <header><div><p className="diagnostics-eyebrow">{project}</p><h2>Coverage</h2>{path && <p>Selected <code>{path}</code></p>}</div></header>
         <p>The map can omit excluded files, unsupported inputs and failed or partial parses. Inspect the recorded reasons before relying on missing graph relationships.</p>
         {(error || coverageError) && <p role="alert" className="diagnostics-error">Coverage reading failed: {error || coverageError}. {index ? 'Previous records remain visible; this is not a fresh reading.' : 'Completeness is unknown.'}</p>}
         <div className="diagnostics-actions"><button type="button" disabled={busy || !project} onClick={() => { void run(); }}>{busy ? 'Reading local diagnosis…' : 'Run local diagnosis'}</button><span>Reads existing coverage metadata through this daemon. No agent, upload or issue creation.</span></div>
@@ -75,6 +75,7 @@ export default function DiagnosticsPanel({ project, client, coverage, coverageEr
             {index.listingComplete && <p className="diagnostics-caveat">All recorded coverage entries have been loaded. The parser limitations and exclusions listed below still apply.</p>}
             {index.truncations.map((note) => <p key={note} className="diagnostics-caveat">Incomplete list: {note}</p>)}
         </>}
+        {indexDetails && <details className="diagnostics-inventory"><summary>Index inventory and legend</summary>{indexDetails}</details>}
         {diagnosis && <div className="diagnostics-reading"><p>Checked {diagnosis.checkedAt} · Index generation <code>{diagnosis.reading.answer.metadata.generation || 'unavailable'}</code> · Recording {diagnosis.reading.answer.metadata.recordingStatus || 'unavailable'}</p>
             {!diagnosis.reading.answer.metadata.generationMatches && <p className="diagnostics-error">Coverage generation does not confirm the current index. Treat the map as potentially stale.</p>}
             {path && <p>{diagnosis.pathAnswer ? freshnessText(diagnosis.pathAnswer.freshness) : 'No path-specific evidence returned. Freshness is unknown.'}</p>}

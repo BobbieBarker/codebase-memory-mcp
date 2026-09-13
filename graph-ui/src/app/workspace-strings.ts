@@ -1,4 +1,4 @@
-export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'agents' | 'system';
+export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'agents' | 'coverage' | 'system';
 export type Guidance = 'brief' | 'explained';
 
 export const workspaceStrings = {
@@ -8,6 +8,7 @@ export const workspaceStrings = {
         { id: 'galaxy' as const, label: 'Galaxy' },
         { id: 'architecture' as const, label: 'Architecture' },
         { id: 'agents' as const, label: 'Agents' },
+        { id: 'coverage' as const, label: 'Coverage' },
         { id: 'system' as const, label: 'System' },
     ],
     tools: 'Tools',
@@ -37,15 +38,19 @@ export const workspaceStrings = {
         galaxy: 'Explore the whole graph and its coverage shadow.',
         architecture: 'See modules, dependencies, and entry points.',
         agents: 'Inspect recorded activity and touched code.',
+        coverage: 'Inspect indexed paths, exclusions, and parser gaps.',
         system: 'Monitor the daemon, indexes, and logs.',
     },
-    changeLater: 'Switch workspaces and explanation depth at any time. Every feature stays available.',
+    changeLater: 'Switch workspaces at any time.',
     localAi: 'Set up browser AI',
     browserAi: 'Chat',
     daemon: 'Daemon',
     daemonNavigation: (state: string) => `Open System: daemon ${state}`,
     chatWidth: 'Width of local chat',
     askSelection: 'Ask about selection',
+    assessImpact: 'Assess impact',
+    codeDetails: 'Code details',
+    indexInventory: 'Index inventory and legend',
     selectionImpact: 'Assess change impact',
     changeAnalysis: 'Change analysis',
     sourceOutsideSnapshot: 'This file is outside the loaded index snapshot.',

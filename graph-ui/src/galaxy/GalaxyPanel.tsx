@@ -591,6 +591,7 @@ export interface GalaxyPanelProps {
     onSelectNode?: ((node: GraphNode) => void) | undefined;
     onSelectShadowNode?: ((node: CoverageShadowNode) => void) | undefined;
     selectedNode?: GraphNode | undefined;
+    onClearSelection?: () => void;
     /** Das Projekt, dessen Layout gezeigt wird. Leer heisst: nichts laden. */
     project: string;
     /** Ob das Panel im Layout sichtbar ist. */
@@ -1412,9 +1413,14 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
         };
     }, [visible, mode, projection, picture, aspect, requestedFit, ownFit, coverageShadow, fitRequest, props.workspaceExpanded]);
 
+    const [backgroundCleared, setBackgroundCleared] = useState(false);
+    useEffect(() => {
+        if (focusQualifiedName || stepQualifiedName || props.focusFilePath) setBackgroundCleared(false);
+    }, [focusQualifiedName, stepQualifiedName, props.focusFilePath, props.focusSourceRange?.startLine, props.focusSourceRange?.endLine]);
+
     // Hin-Richtung in der Galaxie: das Twin-Subjekt zieht die Kamera nach.
     useEffect(() => {
-        if (mode !== 'galaxy' || data === undefined) {
+        if (backgroundCleared || mode !== 'galaxy' || data === undefined) {
             return;
         }
         const node = focusQualifiedName ? index.get(focusQualifiedName) : undefined;
@@ -1443,7 +1449,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
         // `focusName` steht bewusst nicht in der Liste: er begleitet den
         // qualifizierten Namen und darf keine zweite Kamerafahrt ausloesen.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [mode, data, index, focusQualifiedName, flyTo, props.focusFilePath, props.focusSourceRange, aspect, visible]);
+    }, [backgroundCleared, mode, data, index, focusQualifiedName, flyTo, props.focusFilePath, props.focusSourceRange, aspect, visible]);
 
     /*
      * FOLLOW: die Kamera geht dorthin, wo sich zuletzt etwas bewegt hat.
@@ -1557,7 +1563,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      * dorthin gehoert, wo der Leser hingegangen ist.
      */
     const pulsedNode = useMemo(() => {
-        if (mode !== 'hierarchy') {
+        if (backgroundCleared || mode !== 'hierarchy') {
             return undefined;
         }
         for (const candidate of [focusQualifiedName, stepQualifiedName]) {
@@ -1569,7 +1575,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
             }
         }
         return undefined;
-    }, [mode, focusQualifiedName, stepQualifiedName, index]);
+    }, [backgroundCleared, mode, focusQualifiedName, stepQualifiedName, index]);
 
     /*
      * In der Hierarchie bleibt alles hell.
@@ -1593,6 +1599,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
     // Rueck-Richtung: ein Klick in die Szene oeffnet die Datei.
     const handleNodeClick = useCallback(
         (node: GraphNode) => {
+            setBackgroundCleared(false);
             // In der Hierarchie bleibt die Kamera stehen und alles hell: sie
             // rahmt den ganzen Subgraphen, und auf eine Spalte zu zoomen waere
             // wieder die Nachbarschaftsansicht, gegen die dieses Bild gebaut
@@ -1619,9 +1626,12 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
     );
 
     const handleBackgroundClick = useCallback(() => {
+        setBackgroundCleared(true);
         setHighlighted(null);
         setNote(mode === 'hierarchy' ? HIERARCHY_NO_FOCUS_NOTE : GALAXY_NO_FOCUS_NOTE);
-    }, [mode]);
+        refitNow();
+        props.onClearSelection?.();
+    }, [mode, refitNow, props.onClearSelection]);
 
     /*
      * Die Vorgabe der Ansicht, mit der Wahl des Lesers darauf.
@@ -1881,7 +1891,7 @@ export default function GalaxyPanel(props: GalaxyPanelProps): JSX.Element {
      * darunter trifft.
      */
     const pulseRing: ReactNode =
-        mode === 'hierarchy' && pulsedNode !== undefined ? (
+        mode === 'hierarchy' && !backgroundCleared && pulsedNode !== undefined ? (
             <Html
                 position={[pulsedNode.x, pulsedNode.y, pulsedNode.z]}
                 center

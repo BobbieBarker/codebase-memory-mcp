@@ -10,6 +10,8 @@ export type { BrowserChatAttachment, BrowserChatContext } from './chat-model';
 export interface BrowserChatDockProps {
     open: boolean;
     onClose: () => void;
+    showCollapsed?: boolean;
+    onOpen?: () => void;
     attachment?: BrowserChatAttachment;
     context?: readonly BrowserChatContext[];
     pendingContext?: BrowserChatContext;
@@ -39,7 +41,7 @@ function ContextSnapshot({ context }: { context: BrowserChatContext }): JSX.Elem
 }
 
 /** Keep mounted when collapsed: state and worker lifetime are independent of visibility. */
-export default function BrowserChatDock({ open, onClose, attachment, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache }: BrowserChatDockProps): JSX.Element {
+export default function BrowserChatDock({ open, onClose, showCollapsed = false, onOpen, attachment, context = [], pendingContext, onContextConsumed, onContextRemoved, onAttachmentConsumed, onAttachmentRemoved, createRuntime = createBrowserChatRuntime, removeCache = removeBrowserModelCache }: BrowserChatDockProps): JSX.Element {
     const [modelId, setModelId] = useState(initialModel.id);
     const model = BROWSER_MODELS.find(candidate => candidate.id === modelId) ?? initialModel;
     const [phase, setPhase] = useState<Phase>('off');
@@ -176,6 +178,15 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
     };
     const submit = (event: FormEvent): void => { event.preventDefault(); void send(); };
     const status = stopping ? 'Stopping' : phase === 'preparing' ? 'Loading' : phase === 'counting' ? 'Checking context' : phase === 'generating' ? 'Answering' : phase === 'removing' ? 'Deleting cache' : phase === 'ready' ? 'Loaded' : 'Off';
+    const needsEnable = phase === 'off';
+    const showConversation = turns.length > 0 || phase === 'ready' || phase === 'counting' || phase === 'generating';
+
+    if (!open && showCollapsed) return <aside className="cbm-chat-dock is-collapsed" aria-label="Local chat">
+        <header className="cbm-chat-header">
+            <h2>Local chat</h2>
+            <button type="button" className="cbm-chat-primary" aria-expanded={false} onClick={onOpen}>{needsEnable ? 'Enable chat' : 'Open chat'}</button>
+        </header>
+    </aside>;
 
     return <aside className="cbm-chat-dock" hidden={!open} aria-label="Local chat">
         <header className="cbm-chat-header">
@@ -183,10 +194,11 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
             <button type="button" className="cbm-chat-icon" aria-label="Collapse local chat" title="Collapse chat; keep conversation" onClick={onClose}>›</button>
         </header>
         <div className="cbm-chat-modelbar">
-            <button type="button" aria-expanded={showModels} aria-controls="cbm-chat-model-settings" onClick={() => setShowModels(value => !value)}><span>{model.displayName}</span><span aria-hidden="true">⌄</span></button>
+            <button type="button" aria-expanded={showModels || needsEnable} aria-controls="cbm-chat-model-settings" disabled={needsEnable} onClick={() => setShowModels(value => !value)}><span>{model.displayName}</span><span aria-hidden="true">⌄</span></button>
             <span className="cbm-chat-status" data-ready={phase === 'ready'} role="status">{status}</span>
         </div>
-        {showModels && <section id="cbm-chat-model-settings" className="cbm-chat-settings" aria-label="Local model settings">
+        {(showModels || needsEnable) && <section id="cbm-chat-model-settings" className={`cbm-chat-settings${needsEnable ? ' is-setup' : ''}`} aria-label="Local model settings">
+            {needsEnable && <h3>Enable chat</h3>}
             <label htmlFor="cbm-chat-model">Model</label>
             <select id="cbm-chat-model" value={modelId} disabled={busy} onChange={event => { release(); setModelId(event.target.value); setError(undefined); setNotice(undefined); }}>
                 {BROWSER_MODELS.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.displayName} · {candidate.availability === 'unsupported' ? 'Requires runtime support' : candidate.id === model.id && phase === 'ready' ? 'Loaded' : downloaded.has(candidate.id) ? 'Downloaded this session' : 'Available'}</option>)}
@@ -203,7 +215,7 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
         {phase === 'preparing' && <div className="cbm-chat-loading" role="status"><progress max={100} value={progress?.progress} /><span>{progress?.file ?? 'Preparing browser model…'}</span><button type="button" onClick={stop}>Stop download</button></div>}
         {error && <div className="cbm-chat-error" role="alert">{error}</div>}
         {notice && <p className="cbm-chat-notice" role="status">{notice}</p>}
-        <div className="cbm-chat-transcript" ref={transcript} role="log" aria-label="Conversation" aria-live="off" onScroll={() => {
+        {showConversation && <div className="cbm-chat-transcript" ref={transcript} role="log" aria-label="Conversation" aria-live="off" onScroll={() => {
             const element = transcript.current;
             if (!element) return;
             followOutput.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
@@ -218,7 +230,7 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
                     {index === turns.length - 1 && turn.status !== 'generating' && <button type="button" className="cbm-chat-retry" disabled={phase !== 'ready'} onClick={() => { void send(turn); }}>Retry</button>}
                 </div>
             </article>)}
-        </div>
+        </div>}
         {newOutput && <button type="button" className="cbm-chat-jump" onClick={() => { followOutput.current = true; setNewOutput(false); if (transcript.current) transcript.current.scrollTop = transcript.current.scrollHeight; }}>Latest answer ↓</button>}
         <form className="cbm-chat-composer" onSubmit={submit}>
             {attachment && <div className="cbm-chat-pending"><div className="cbm-chat-pending-title"><span>Attached to next message</span><button type="button" aria-label="Remove code attachment" disabled={!onAttachmentRemoved} onClick={() => onAttachmentRemoved?.(attachment.id)}>×</button></div><Attachment attachment={attachment} /></div>}
@@ -228,7 +240,7 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
                 const checked = event.target.checked;
                 setSelectedContext(previous => checked ? [...previous.filter(selected => selected.id !== item.id), { ...item }] : previous.filter(selected => selected.id !== item.id));
             }} />{item.label}</label>)}</fieldset></details>}
-            <label className="cbm-chat-visually-hidden" htmlFor="cbm-chat-prompt">Message local model</label>
+            {showConversation && <><label className="cbm-chat-visually-hidden" htmlFor="cbm-chat-prompt">Message local model</label>
             <textarea ref={input} id="cbm-chat-prompt" value={draft} placeholder="Ask about this code…" rows={3} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); }
             }} />
@@ -236,6 +248,7 @@ export default function BrowserChatDock({ open, onClose, attachment, context = [
                 {phase === 'counting' || phase === 'generating' ? <button type="button" disabled={stopping} onClick={stop}>{stopping ? 'Stopping…' : 'Stop'}</button> : <button className="cbm-chat-primary" type="submit" disabled={phase !== 'ready' || !draft.trim()}>Send ↑</button>}
             </div>
             <p className="cbm-chat-context">{tokenCount !== undefined ? `${tokenCount.toLocaleString()} input tokens in last check · ` : ''}{turns.length ? 'Earlier messages stay in context. ' : ''}Session only · Verify model answers.</p>
+            </>}
         </form>
     </aside>;
 }

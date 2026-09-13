@@ -9,12 +9,15 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import AtlasTree, { twistyFor } from './AtlasTree';
+import AtlasTree, { AtlasTreeIndexDetails, twistyFor } from './AtlasTree';
 import type { AtlasTreeProps } from './AtlasTree';
 import type { TreeRow } from './tree-model';
 
 let container: HTMLDivElement;
 let root: Root;
+async function renderIndexDetails(details: AtlasTreeProps) {
+    await act(async () => root.render(<AtlasTreeIndexDetails {...details} />));
+}
 
 beforeEach(() => {
     (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -142,9 +145,9 @@ describe('AtlasTree', () => {
     });
 
     it('zeigt die Herkunftszeile des Baums und faerbt eine Abwesenheit', async () => {
-        await render(props());
+        await renderIndexDetails(props());
         expect(container.querySelector('.atlas-tree-note')?.textContent).toContain('/api/tree');
-        await render(props({ note: 'tree unavailable: HTTP 404', noteIsAbsence: true }));
+        await renderIndexDetails(props({ note: 'tree unavailable: HTTP 404', noteIsAbsence: true }));
         expect(container.querySelector('.atlas-tree-note')?.getAttribute('data-state')).toBe('absent');
     });
 });
@@ -231,7 +234,7 @@ describe('AtlasTree und die Coverage-Stufen', () => {
     });
 
     it('erklaert in der Legende auch den Gutfall, mit seinem Punkt', async () => {
-        await render(props({ rows: coveredRows }));
+        await renderIndexDetails(props({ rows: coveredRows }));
         const good = container.querySelector('[data-testid="atlas-tree-legend-entry"][data-coverage="indexed"]');
         expect(good).not.toBeNull();
         expect(good?.querySelector('[data-testid="atlas-tree-legend-dot"]')?.getAttribute('data-tone'))
@@ -264,7 +267,7 @@ describe('AtlasTree und die Coverage-Stufen', () => {
     });
 
     it('zeigt eine Legende mit den vorkommenden Stufen und dem Quellensatz', async () => {
-        await render(props({ rows: coveredRows }));
+        await renderIndexDetails(props({ rows: coveredRows }));
         const legend = container.querySelector('[data-testid="atlas-tree-legend"]');
         expect(legend).not.toBeNull();
         const entries = [...container.querySelectorAll('[data-testid="atlas-tree-legend-entry"]')]
@@ -275,14 +278,14 @@ describe('AtlasTree und die Coverage-Stufen', () => {
     });
 
     it('erklaert keine Stufe, die im Baum nicht vorkommt', async () => {
-        await render(props({ rows: [withCoverage(file('a.ts'), 'indexed')] }));
+        await renderIndexDetails(props({ rows: [withCoverage(file('a.ts'), 'indexed')] }));
         const entries = [...container.querySelectorAll('[data-testid="atlas-tree-legend-entry"]')]
             .map((entry) => entry.getAttribute('data-coverage'));
         expect(entries).toEqual(['indexed']);
     });
 
     it('zeigt jede gekappte Liste als eigene ehrliche Zeile', async () => {
-        await render(props({
+        await renderIndexDetails(props({
             rows: coveredRows,
             truncations: ['the server cut the skipped list: 812 recorded, fewer listed'],
         }));

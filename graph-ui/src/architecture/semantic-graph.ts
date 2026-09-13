@@ -3,7 +3,7 @@ import type { GraphData, GraphEdge, GraphNode } from '../galaxy/types';
 import { areaOf, MAP_RELATIONS } from './repository-map';
 import type { RouteGraphSnapshot } from './route-graph-source';
 
-export type SemanticView = 'overview' | 'dependencies' | 'entryPoints' | 'routes';
+export type SemanticView = 'overview' | 'dependencies' | 'entryPoints' | 'routes' | 'hotspots';
 export interface SemanticNode {
     id: string;
     kind: 'area' | 'file' | 'symbol' | 'route';
@@ -18,6 +18,10 @@ export interface SemanticNode {
     areaPath?: string;
     members: GraphNode[];
     depth?: number;
+    /** Optional scene treatment for service declarations; source maps keep their defaults. */
+    footprint?: [number, number];
+    tint?: string;
+    kindLabel?: string;
 }
 export interface SemanticEvidence {
     source: GraphNode;
@@ -38,12 +42,24 @@ export interface SemanticEdge {
     count: number;
     evidence: SemanticEvidence[];
 }
+/** Visual folder context only; these containers are never graph nodes. */
+export interface SemanticPlatform {
+    id: string;
+    path: string;
+    label: string;
+    /** Y denotes the top surface of the shallow platform. */
+    position: [number, number, number];
+    width: number;
+    depth: number;
+    level: number;
+}
 export interface SemanticGraph {
     view: SemanticView;
     scopeKey: string;
     title: string;
     positionMeaning: string;
     nodes: SemanticNode[];
+    platforms?: SemanticPlatform[];
     edges: SemanticEdge[];
     totalNodes: number;
     totalEdges: number;
@@ -64,6 +80,9 @@ export interface SemanticGraphOptions {
     routeSnapshot?: RouteGraphSnapshot;
     maxNodes?: number;
     maxEdges?: number;
+    /** File inventory is independent of the dependency graph and its row cap. */
+    knownFiles?: string[];
+    visibleFiles?: ReadonlySet<string>;
 }
 
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
@@ -117,6 +136,117 @@ function bounded(value: number | undefined, fallback: number, maximum: number): 
     return Number.isFinite(value) ? Math.max(1, Math.min(maximum, Math.floor(value!))) : fallback;
 }
 
+interface HierarchyBox {
+    key: string;
+    path: string;
+    level: number;
+    unknown?: boolean;
+    node?: SemanticNode;
+    children: HierarchyBox[];
+    width: number;
+    depth: number;
+    x: number;
+    z: number;
+}
+const hierarchyPath = (path: string | undefined) => !path || path === '{}' ? undefined
+    : path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+/g, '/').replace(/\/$/, '');
+const parentPath = (path: string) => path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+const hierarchyNodeOrder = (a: SemanticNode, b: SemanticNode) => compare(hierarchyPath(a.filePath) ?? a.areaPath ?? '', hierarchyPath(b.filePath) ?? b.areaPath ?? '')
+    || (a.line ?? 0) - (b.line ?? 0) || compare(a.id, b.id);
+
+/** Deterministic shelf packing; its inputs are source identity and hierarchy only. */
+function packHierarchy(box: HierarchyBox): void {
+    if (box.node) return;
+    const gap = 10;
+    const padding = box.level ? 12 : 0;
+    const labelEdge = box.level ? 16 : 0;
+    for (const child of box.children) packHierarchy(child);
+    const target = Math.max(24, ...box.children.map(child => child.width),
+        Math.sqrt(box.children.reduce((sum, child) => sum + (child.width + gap) * (child.depth + gap), 0)) * 1.2);
+    let x = 0; let z = 0; let rowDepth = 0; let width = 0;
+    for (const child of box.children) {
+        if (x > 0 && x + child.width > target) { x = 0; z += rowDepth + gap; rowDepth = 0; }
+        child.x = x + child.width / 2;
+        child.z = z + child.depth / 2;
+        width = Math.max(width, x + child.width);
+        rowDepth = Math.max(rowDepth, child.depth);
+        x += child.width + gap;
+    }
+    box.width = width + padding * 2;
+    box.depth = z + rowDepth + padding + labelEdge;
+    for (const child of box.children) {
+        child.x += padding - box.width / 2;
+        child.z += labelEdge - box.depth / 2;
+    }
+}
+
+/**
+ * Arrange unfiltered candidates by actual source folders, never relation count
+ * or hotspot rank. Only positions change; callers retain all graph identities.
+ * Deep paths share their third real ancestor to keep the steps shallow.
+ */
+export function layoutFolderHierarchy(nodes: SemanticNode[]): SemanticPlatform[] {
+    if (!nodes.length) return [];
+    const root: HierarchyBox = { key: '', path: '', level: 0, children: [], width: 0, depth: 0, x: 0, z: 0 };
+    const folders = new Map<string, HierarchyBox>();
+    const areaPaths = nodes.filter(node => node.kind === 'area').map(node => hierarchyPath(node.areaPath)).filter((path): path is string => Boolean(path && path !== '(root)'));
+    const areasWithDescendants = new Set<string>();
+    for (const path of areaPaths) {
+        let ancestor = parentPath(path);
+        while (ancestor) { areasWithDescendants.add(ancestor); ancestor = parentPath(ancestor); }
+    }
+    for (const node of [...nodes].sort(hierarchyNodeOrder)) {
+        const path = hierarchyPath(node.kind === 'area' ? node.areaPath : node.filePath);
+        const containing = path === '(root)' ? '' : path === undefined ? undefined
+            : node.kind === 'area' && areasWithDescendants.has(path) ? path : parentPath(path);
+        let owner = root;
+        if (containing === undefined) {
+            let unknown = folders.get('unknown');
+            if (!unknown) {
+                unknown = { key: 'unknown', path: '', unknown: true, level: 1, children: [], width: 0, depth: 0, x: 0, z: 0 };
+                root.children.push(unknown); folders.set('unknown', unknown);
+            }
+            owner = unknown;
+        } else {
+            const parts = containing.split('/').filter(Boolean).slice(0, 3);
+            parts.forEach((_, index) => {
+                const folderPath = parts.slice(0, index + 1).join('/');
+                const key = `folder:${folderPath}`;
+                let folder = folders.get(key);
+                if (!folder) {
+                    folder = { key, path: folderPath, level: index + 1, children: [], width: 0, depth: 0, x: 0, z: 0 };
+                    owner.children.push(folder); folders.set(key, folder);
+                }
+                owner = folder;
+            });
+        }
+        owner.children.push({ key: `node:${node.id}`, path: path ?? '', level: owner.level, node, children: [], width: 24, depth: 24, x: 0, z: 0 });
+    }
+    const sortChildren = (box: HierarchyBox) => {
+        box.children.sort((a, b) => a.node && b.node ? hierarchyNodeOrder(a.node, b.node)
+            : Number(Boolean(a.node)) - Number(Boolean(b.node)) || Number(Boolean(a.unknown)) - Number(Boolean(b.unknown)) || compare(a.key, b.key));
+        box.children.filter(child => !child.node).forEach(sortChildren);
+    };
+    sortChildren(root);
+    packHierarchy(root);
+    const platforms: SemanticPlatform[] = [];
+    const place = (box: HierarchyBox, x: number, z: number) => {
+        if (box.node) { box.node.position = [x, box.level * 1.6 + 0.08, z]; return; }
+        if (box.level) platforms.push({ id: `hierarchy:${box.key}`, path: box.path,
+            label: box.unknown ? 'Unknown source' : box.path, position: [x, box.level * 1.6, z], width: box.width, depth: box.depth, level: box.level });
+        for (const child of box.children) place(child, x + child.x, z + child.z);
+    };
+    place(root, 0, 0);
+    return platforms;
+}
+
+/** Prune empty containers without repacking the stable unfiltered layout. */
+export function pruneHierarchyPlatforms(platforms: SemanticPlatform[], nodes: SemanticNode[]): SemanticPlatform[] {
+    return platforms.filter(platform => nodes.some(node => node.position[1] >= platform.position[1]
+        && Math.abs(node.position[0] - platform.position[0]) < platform.width / 2
+        && Math.abs(node.position[2] - platform.position[2]) < platform.depth / 2));
+}
+
 /** Stable presentation projection. Scene limits are independent of backend snapshot limits. */
 export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptions): SemanticGraph {
     const byId = new Map(graph.nodes.map(node => [node.id, node]));
@@ -133,7 +263,7 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
     let edges: SemanticEdge[] = [];
     const warnings: string[] = [];
     let title = options.filePath ?? options.areaPath ?? 'Repository structure';
-    let positionMeaning = 'Source areas form a stable directory map. Boxes represent source grouping, not deployed services.';
+    let positionMeaning = 'Nested platforms follow source folders. Positions are stable across text filters; boxes represent source grouping, not deployed services.';
     const depth = bounded(options.depth, 3, 8);
     let rootId: string | undefined;
 
@@ -221,6 +351,7 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
         const groups = new Map<string, SemanticNode>();
         const nodeGroups = new Map<number, string>();
         for (const node of graph.nodes.filter(sourceNode).sort(nodeOrder)) {
+            if (options.visibleFiles && !options.visibleFiles.has(node.file_path!)) continue;
             const area = areaOf(node.file_path!);
             if (options.areaPath && area !== options.areaPath) continue;
             if (options.filePath && node.file_path !== options.filePath) continue;
@@ -236,9 +367,26 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
                 filePath: kind === 'file' ? path : undefined, areaPath: area, members: [] };
             group.members.push(node); group.count++; groups.set(id, group); nodeGroups.set(node.id, id);
         }
+        // Retain files with no graph nodes/edges as navigable inventory objects.
+        // They deliberately have no graphNode and cannot fabricate impact evidence.
+        const inventory = new Map<string, Set<string>>();
+        for (const path of options.knownFiles ?? []) {
+            if (!path || path === '{}' || (options.visibleFiles && !options.visibleFiles.has(path))) continue;
+            const area = areaOf(path);
+            if ((options.areaPath && area !== options.areaPath) || (options.filePath && path !== options.filePath)) continue;
+            const kind = options.areaPath || options.filePath ? 'file' : 'area';
+            const key = kind === 'file' ? path : area;
+            const id = `${kind}:${key}`;
+            const paths = inventory.get(id) ?? new Set<string>(); paths.add(path); inventory.set(id, paths);
+            if (options.filePath && [...groups.values()].some(group => group.filePath === path)) continue;
+            if (!groups.has(id)) groups.set(id, { id, kind, label: key,
+                detail: options.filePath ? 'File inventory · no symbols in the loaded graph' : '',
+                position: [0, 0, 0], count: 0, areaPath: area, filePath: kind === 'file' ? path : undefined, members: [] });
+        }
         let scopedEvidence = evidence;
         if (options.areaPath || options.filePath) {
             const inScope = (node: GraphNode) => sourceNode(node)
+                && (!options.visibleFiles || options.visibleFiles.has(node.file_path!))
                 && (!options.areaPath || areaOf(node.file_path!) === options.areaPath)
                 && (!options.filePath || node.file_path === options.filePath);
             scopedEvidence = evidence.filter(edge => inScope(edge.source) || inScope(edge.target));
@@ -247,6 +395,7 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
                 const inside = inScope(edge.source) ? edge.source : edge.target;
                 const outside = inside === edge.source ? edge.target : edge.source;
                 if (!sourceNode(outside)) continue;
+                if (options.visibleFiles && !options.visibleFiles.has(outside.file_path!)) continue;
                 // File/module imports remain attributed to the real file, never
                 // guessed onto an arbitrary symbol in the opened file.
                 if (!nodeGroups.has(inside.id) && options.filePath && ['File', 'Module'].includes(inside.label)) {
@@ -268,11 +417,12 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
             }
         }
         nodes = [...groups.values()].map(node => ({ ...node, members: node.members.sort(nodeOrder),
-            detail: node.detail || `${new Set(node.members.map(member => member.file_path)).size} files · ${node.count} indexed nodes` }));
+            detail: node.detail || `${new Set([...node.members.map(member => member.file_path), ...(inventory.get(node.id) ?? [])]).size} files · ${node.count} indexed nodes` }));
         edges = aggregate(scopedEvidence, node => nodeGroups.get(node.id));
         if (options.view === 'dependencies') title = options.filePath ?? options.areaPath ?? 'Dependencies between source areas';
     }
 
+    const platforms = options.view !== 'entryPoints' && options.view !== 'routes' ? layoutFolderHierarchy(nodes) : undefined;
     const filter = options.filter?.trim().toLowerCase();
     const matching = new Set<string>();
     if (filter) {
@@ -298,8 +448,6 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
     edges = edges.filter(edge => visibleIds.has(edge.source) && visibleIds.has(edge.target))
         .sort((a, b) => Number(matching.has(b.source) || matching.has(b.target)) - Number(matching.has(a.source) || matching.has(a.target))
             || b.count - a.count || compare(a.id, b.id)).slice(0, bounded(options.maxEdges, 100, 200));
-    const columns = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
-    const rows = Math.ceil(nodes.length / columns);
     const lanes = new Map<number, SemanticNode[]>();
     for (const node of nodes) {
         const lane = options.view === 'entryPoints' ? node.depth ?? 0
@@ -310,7 +458,7 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
     // between depth/role bands so a large lane never crosses the next one.
     const widestBand = Math.max(1, ...[...lanes.values()].map(items => Math.ceil(items.length / 5)));
     const laneSpacing = Math.max(options.view === 'routes' ? 32 : 24, (widestBand - 1) * 20 + 24);
-    nodes.forEach((node, index) => {
+    nodes.forEach(node => {
         if (options.view === 'entryPoints' || options.view === 'routes') {
             const lane = options.view === 'entryPoints' ? node.depth ?? 0
                 : node.kind === 'route' ? 0 : node.id.startsWith('handler') ? 1 : -1;
@@ -320,13 +468,12 @@ export function buildSemanticGraph(graph: GraphData, options: SemanticGraphOptio
             const siblingIndex = siblings.indexOf(node);
             node.position = [lane * laneSpacing + (Math.floor(siblingIndex / laneRows) - (laneColumns - 1) / 2) * 20,
                 options.view === 'entryPoints' ? lane * 3 : 0, (siblingIndex % laneRows - (laneRows - 1) / 2) * 20];
-        } else node.position = [(index % columns - (columns - 1) / 2) * 24,
-            node.kind === 'symbol' ? 12 : node.kind === 'file' ? 6 : 0,
-            (Math.floor(index / columns) - (rows - 1) / 2) * 24];
+        }
     });
     if (unresolved) warnings.push(`${unresolved} relationships have an endpoint outside the loaded repository snapshot.`);
     if (graph.total_nodes > graph.nodes.length) warnings.push('The loaded repository snapshot contains only part of the indexed graph.');
     return { view: options.view, scopeKey: `${options.view}:${options.areaPath ?? ''}:${options.filePath ?? ''}:${rootId ?? ''}:${filter ?? ''}`,
-        title, positionMeaning, nodes, edges, totalNodes, totalEdges, omittedNodes: totalNodes - nodes.length,
+        title, positionMeaning, nodes, ...(platforms ? { platforms: pruneHierarchyPlatforms(platforms, nodes) } : {}),
+        edges, totalNodes, totalEdges, omittedNodes: totalNodes - nodes.length,
         omittedEdges: totalEdges - edges.length, warnings: [...new Set(warnings)] };
 }

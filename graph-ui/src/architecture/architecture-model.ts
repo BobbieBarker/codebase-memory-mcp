@@ -1,7 +1,8 @@
 import type { ArchitectureBoundary, ArchitectureOverviewDto } from '../core/intelligence-provider';
 
-export const ARCHITECTURE_VIEWS = ['overview', 'dependencies', 'entryPoints', 'routes', 'hotspots'] as const;
-export type ArchitectureView = typeof ARCHITECTURE_VIEWS[number];
+export const ARCHITECTURE_VIEWS = ['overview', 'routes', 'hotspots', 'structure', 'behavior'] as const;
+/** Legacy Dependencies migrates to Overview; Entry points remains a mode within Overview. */
+export type ArchitectureView = typeof ARCHITECTURE_VIEWS[number] | 'dependencies' | 'entryPoints';
 export interface ArchitectureConfig { view: ArchitectureView; filter: string }
 export interface ConfigStorage { getItem(key: string): string | null; setItem(key: string, value: string): void }
 export interface BoundaryMap { groups: string[]; boundaries: ArchitectureBoundary[]; omittedGroups: number }
@@ -18,11 +19,12 @@ export function readArchitectureConfig(storage: ConfigStorage | undefined, proje
         const value: unknown = JSON.parse(raw);
         if (value === null || typeof value !== 'object') return { ...DEFAULT_ARCHITECTURE_CONFIG };
         const candidate = value as Record<string, unknown>;
+        const view = candidate.view === 'dependencies' ? 'overview' : candidate.view;
         if (candidate.version !== 1 || typeof candidate.filter !== 'string'
-            || !ARCHITECTURE_VIEWS.includes(candidate.view as ArchitectureView)) {
+            || (view !== 'entryPoints' && !ARCHITECTURE_VIEWS.includes(view as typeof ARCHITECTURE_VIEWS[number]))) {
             return { ...DEFAULT_ARCHITECTURE_CONFIG };
         }
-        return { view: candidate.view as ArchitectureView, filter: candidate.filter };
+        return { view: view as ArchitectureView, filter: candidate.filter };
     } catch {
         return { ...DEFAULT_ARCHITECTURE_CONFIG };
     }
@@ -31,7 +33,9 @@ export function readArchitectureConfig(storage: ConfigStorage | undefined, proje
 export function saveArchitectureConfig(storage: ConfigStorage | undefined, project: string, config: ArchitectureConfig): boolean {
     if (!storage || !project) return false;
     try {
-        storage.setItem(configKey(project), JSON.stringify({ version: 1, ...config }));
+        storage.setItem(configKey(project), JSON.stringify({
+            version: 1, ...config, view: config.view === 'dependencies' ? 'overview' : config.view,
+        }));
         return true;
     } catch {
         return false;

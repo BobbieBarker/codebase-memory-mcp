@@ -36,6 +36,7 @@ import Hint from '../ui/tooltip/Hint';
 import { LAYOUT_DEFAULT } from '../layout/layout-model';
 import Splitter from '../layout/Splitter';
 import { workspaceStrings } from './workspace-strings';
+import GraphEdgeControls from '../graph/GraphEdgeControls';
 import type { Workspace, Guidance } from './workspace-strings';
 
 /** Ein Menuepunkt: sein Buchstaben-Kuerzel und der Rest des Wortes. */
@@ -145,6 +146,7 @@ export interface AtlasChromeProps {
     /** Persistent code context, shared by the Explore sidebar and chat column. */
     selectionInspector?: ReactNode;
     readerActions?: ReactNode;
+    readerDetails?: ReactNode;
     onOpenSystem?: () => void;
     daemonState?: 'connected' | 'disconnected' | 'checking';
     globalOverlay?: ReactNode;
@@ -153,7 +155,6 @@ export interface AtlasChromeProps {
     workspacePanel?: ReactNode;
     workspaceStatus?: ReactNode;
     guidance?: Guidance;
-    onGuidanceChange?: (guidance: Guidance) => void;
     /** Versions-Chip, zur Buildzeit injiziert. Nur die Fassung, ohne Zusatz. */
     version: string;
     /**
@@ -534,7 +535,11 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
      */
     const [commandFocused, setCommandFocused] = useState(false);
     const [chatWidth, setChatWidth] = useState(420);
-    const [graphHeight, setGraphHeight] = useState(380);
+    const [graphShare, setGraphShare] = useState(1 / 3);
+    const [chatColumnHeight, setChatColumnHeight] = useState(600);
+    const chatColumn = useRef<HTMLDivElement>(null);
+    const graphSpace = Math.max(1, chatColumnHeight - 8);
+    const graphHeight = graphSpace * graphShare;
     const [searchOpen, setSearchOpen] = useState(false);
     const searchDialog = useRef<HTMLDialogElement>(null);
     const searchButton = useRef<HTMLButtonElement>(null);
@@ -565,8 +570,19 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
         element.className = 'atlas-galaxy-mount';
         return element;
     });
-    const graphBelowChat = props.chatOpen === true &&
-        (props.workspace ?? 'explore') === 'explore' && props.galaxy !== undefined;
+    const explorerDock = isExplore && !hasInspector && props.chatDock !== undefined && props.galaxy !== undefined;
+    const showChatColumn = props.chatOpen === true || explorerDock;
+    const graphBelowChat = (props.chatOpen === true || explorerDock) && isExplore && props.galaxy !== undefined;
+    useLayoutEffect(() => {
+        const element = chatColumn.current;
+        if (!element || !showChatColumn) return;
+        const measure = () => { if (element.clientHeight > 0) setChatColumnHeight(element.clientHeight); };
+        measure();
+        if (typeof ResizeObserver === 'undefined') return;
+        const observer = new ResizeObserver(measure);
+        observer.observe(element);
+        return () => observer.disconnect();
+    }, [showChatColumn]);
     useLayoutEffect(() => {
         const host = graphBelowChat ? chatGalaxyHost.current : inlineGalaxyHost.current;
         if (host !== null && galaxyMount !== null) host.appendChild(galaxyMount);
@@ -630,7 +646,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
      */
     const zones = props.zones ?? LAYOUT_DEFAULT;
     const hasSide =
-        hasInspector || props.twin !== undefined || props.galaxy !== undefined || props.llm !== undefined;
+        hasInspector || props.twin !== undefined || (props.galaxy !== undefined && !graphBelowChat) || props.llm !== undefined;
 
     const stopTabKeys = (event: KeyboardEvent<HTMLInputElement>): void => {
         if (event.key === 'Escape') {
@@ -643,7 +659,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
     };
 
     return (
-        <div className="atlas-shell" data-workspace={props.workspace ?? 'explore'} data-guidance={props.guidance ?? 'brief'} data-chat-open={props.chatOpen === true} data-has-status={props.workspaceStatus !== undefined}>
+        <div className="atlas-shell" data-workspace={props.workspace ?? 'explore'} data-guidance={props.guidance ?? 'brief'} data-chat-open={showChatColumn} data-has-status={props.workspaceStatus !== undefined}>
             <header className="atlas-header" data-testid="atlas-header">
                 <h1 className="atlas-brand">{messages.app.brand}</h1>
                 <span className="atlas-version" data-testid="atlas-version">
@@ -697,91 +713,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                     aria-expanded={searchOpen} onClick={openSearch}>
                     {workspaceStrings.search}<kbd>{workspaceStrings.searchShortcut}</kbd>
                 </button>
-                <details className="atlas-tools-menu" onClick={(event) => {
-                    if ((event.target as HTMLElement).closest('button')) event.currentTarget.open = false;
-                }} onKeyDown={(event) => {
-                    if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); }
-                }}>
-                <summary>{workspaceStrings.tools}</summary>
-                <nav className="atlas-menu" data-testid="atlas-menu" aria-label={messages.menu.ariaLabel}>
-                    {MENU_ITEMS.map((item) => {
-                        const wiring = props.menus?.[item.key];
-                        return wiring === undefined ? null : (
-                            <span className="atlas-menu-group" key={item.key}>
-                                <Hint name={`menu-${item.key}`} text={wiring.title}>
-                                    <button
-                                        type="button"
-                                        className="atlas-menu-item"
-                                        data-state={wiring.state}
-                                        data-menu={item.key}
-                                        data-testid="atlas-menu-item"
-                                        aria-pressed={wiring.state === 'on'}
-                                        onClick={wiring.onSelect}
-                                    >
-                                        <span className="atlas-menu-key">[{item.key}]</span>
-                                        {item.rest}
-                                    </button>
-                                </Hint>
-                                {(wiring.extras ?? [])
-                                    .filter((extra) => extra.key !== 'bug' && extra.key !== 'impact')
-                                    .map((extra) => {
-                                    const parts = splitMenuLabel(extra.label);
-                                    return (
-                                        <Hint
-                                            key={extra.key}
-                                            name={`menu-${item.key}-${extra.key}`}
-                                            text={extra.title}
-                                        >
-                                            <button
-                                                type="button"
-                                                className="atlas-menu-item"
-                                                /*
-                                                 * `off` und nicht ein dritter
-                                                 * Wert: ein Eintrag der
-                                                 * Atlas-Zeile schaltet eine
-                                                 * Flaeche auf, die beim Zeichnen
-                                                 * der Zeile noch zu ist. `on`
-                                                 * waere die Behauptung, sie
-                                                 * stuende schon da.
-                                                 */
-                                                data-state="off"
-                                                data-menu={`${item.key}-${extra.key}`}
-                                                data-testid="atlas-menu-item"
-                                                onClick={extra.onSelect}
-                                            >
-                                                {parts.key.length > 0 && (
-                                                    <span className="atlas-menu-key">[{parts.key}]</span>
-                                                )}
-                                                {parts.rest}
-                                            </button>
-                                        </Hint>
-                                    );
-                                })}
-                            </span>
-                        );
-                    })}
-                    {/*
-                      * Was die Klammer bedeutet, in der Zeile selbst.
-                      *
-                      * Seit dem 2026-08-29 gilt ein Menuebuchstabe nur mit
-                      * Alt/Option (src/app/keyboard.ts nennt den Grund: blanke
-                      * Buchstaben gehoeren dem Tippen). Ein `[a]` ohne diese
-                      * Angabe waere genau die Sorte Versprechen, die dieser
-                      * Zyklus aus der Zeile entfernt hat.
-                      */}
-                    <span className="atlas-menu-legend" data-testid="atlas-menu-legend">
-                        {messages.menu.legend}
-                    </span>
-                </nav>
-                </details>
-                {props.onGuidanceChange !== undefined && (
-                    <select className="atlas-guidance" aria-label={workspaceStrings.guidance}
-                        value={props.guidance ?? 'brief'}
-                        onChange={(event) => props.onGuidanceChange?.(event.target.value as Guidance)}>
-                        <option value={workspaceStrings.briefValue}>{workspaceStrings.brief}</option>
-                        <option value={workspaceStrings.explainedValue}>{workspaceStrings.explained}</option>
-                    </select>
-                )}
+                <GraphEdgeControls />
                 <div className="atlas-chips">
                     {props.chips.filter(chip => props.projectSwitcher === undefined || chip.label !== messages.statusbar.chipProject).map((chip) => (
                         <ChipView key={chip.label} chip={chip} />
@@ -842,6 +774,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                         )}
                         {props.readerActions !== undefined && <div className="atlas-reader-actions">{props.readerActions}</div>}
                     </div>
+                    {props.readerDetails && <section className="atlas-reader-details" aria-label={workspaceStrings.codeDetails}>{props.readerDetails}</section>}
                     {props.coverageNote !== undefined && (
                         <p
                             className="atlas-coverage-note"
@@ -883,15 +816,15 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
             </div>
             <main className="atlas-alternate-workspace" hidden={props.workspace === undefined || props.workspace === 'explore' || props.workspace === 'galaxy'}>{props.workspacePanel}</main>
             </div>
-            {props.chatOpen === true && <Splitter testId="atlas-split-chat" orientation="vertical" label={workspaceStrings.chatWidth} value={chatWidth}
+            {showChatColumn && <Splitter testId="atlas-split-chat" orientation="vertical" label={workspaceStrings.chatWidth} value={chatWidth}
                 min={300} max={600} invert onChange={setChatWidth} onReset={() => setChatWidth(420)} />}
-            <div className="atlas-chat-column" hidden={props.chatOpen !== true} data-graph={graphBelowChat} data-selection-inspector={inspectorAboveChat}
-                style={{ '--atlas-chat-graph-height': `${graphHeight}px` } as CSSProperties}>
+            <div ref={chatColumn} className="atlas-chat-column" hidden={!showChatColumn} data-graph={graphBelowChat} data-selection-inspector={inspectorAboveChat} data-chat-expanded={props.chatOpen === true}
+                style={{ '--atlas-chat-graph-height': `${graphHeight}px`, '--atlas-chat-fraction': `${1 - graphShare}fr`, '--atlas-graph-fraction': `${graphShare}fr` } as CSSProperties}>
                 <div ref={chatInspectorHost} className="atlas-selection-host" hidden={!inspectorAboveChat} />
                 {props.chatDock}
-                {graphBelowChat && <Splitter testId="atlas-split-chat-graph" orientation="horizontal"
-                    label={workspaceStrings.chatGraphHeight} value={graphHeight} min={320} max={640} invert
-                    onChange={setGraphHeight} onReset={() => setGraphHeight(380)} />}
+                {graphBelowChat && props.chatOpen === true && <Splitter testId="atlas-split-chat-graph" orientation="horizontal"
+                    label={workspaceStrings.chatGraphHeight} value={graphHeight} min={graphSpace / 3} max={graphSpace * 0.85} invert
+                    onChange={value => setGraphShare(Math.min(0.85, Math.max(1 / 3, value / graphSpace)))} onReset={() => setGraphShare(1 / 3)} />}
                 <div ref={chatGalaxyHost} className="atlas-galaxy-host" hidden={!graphBelowChat} />
             </div>
             {galaxyMount !== null && createPortal(props.galaxy, galaxyMount)}
@@ -988,6 +921,76 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
                 <span className="atlas-command-hint">{props.commandHint}</span>
             </div>
 
+                <nav className="atlas-menu" data-testid="atlas-menu" onClick={event => { if ((event.target as HTMLElement).closest('button')) closeSearch(); }} aria-label={messages.menu.ariaLabel}>
+                    {MENU_ITEMS.map((item) => {
+                        const wiring = props.menus?.[item.key];
+                        return wiring === undefined ? null : (
+                            <span className="atlas-menu-group" key={item.key}>
+                                <Hint name={`menu-${item.key}`} text={wiring.title}>
+                                    <button
+                                        type="button"
+                                        className="atlas-menu-item"
+                                        data-state={wiring.state}
+                                        data-menu={item.key}
+                                        data-testid="atlas-menu-item"
+                                        aria-pressed={wiring.state === 'on'}
+                                        onClick={wiring.onSelect}
+                                    >
+                                        <span className="atlas-menu-key">[{item.key}]</span>
+                                        {item.rest}
+                                    </button>
+                                </Hint>
+                                {(wiring.extras ?? [])
+                                    .filter((extra) => extra.key !== 'bug' && extra.key !== 'impact')
+                                    .map((extra) => {
+                                    const parts = splitMenuLabel(extra.label);
+                                    return (
+                                        <Hint
+                                            key={extra.key}
+                                            name={`menu-${item.key}-${extra.key}`}
+                                            text={extra.title}
+                                        >
+                                            <button
+                                                type="button"
+                                                className="atlas-menu-item"
+                                                /*
+                                                 * `off` und nicht ein dritter
+                                                 * Wert: ein Eintrag der
+                                                 * Atlas-Zeile schaltet eine
+                                                 * Flaeche auf, die beim Zeichnen
+                                                 * der Zeile noch zu ist. `on`
+                                                 * waere die Behauptung, sie
+                                                 * stuende schon da.
+                                                 */
+                                                data-state="off"
+                                                data-menu={`${item.key}-${extra.key}`}
+                                                data-testid="atlas-menu-item"
+                                                onClick={extra.onSelect}
+                                            >
+                                                {parts.key.length > 0 && (
+                                                    <span className="atlas-menu-key">[{parts.key}]</span>
+                                                )}
+                                                {parts.rest}
+                                            </button>
+                                        </Hint>
+                                    );
+                                })}
+                            </span>
+                        );
+                    })}
+                    {/*
+                      * Was die Klammer bedeutet, in der Zeile selbst.
+                      *
+                      * Seit dem 2026-08-29 gilt ein Menuebuchstabe nur mit
+                      * Alt/Option (src/app/keyboard.ts nennt den Grund: blanke
+                      * Buchstaben gehoeren dem Tippen). Ein `[a]` ohne diese
+                      * Angabe waere genau die Sorte Versprechen, die dieser
+                      * Zyklus aus der Zeile entfernt hat.
+                      */}
+                    <span className="atlas-menu-legend" data-testid="atlas-menu-legend">
+                        {messages.menu.legend}
+                    </span>
+                </nav>
             </dialog>
 
             <div className="atlas-statusbar" data-testid="atlas-statusbar">

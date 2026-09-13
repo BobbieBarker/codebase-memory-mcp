@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ArchitectureOverviewDto } from '../core/intelligence-provider';
 import {
-    boundaryMap, DEFAULT_ARCHITECTURE_CONFIG, matchingArchitecture,
+    ARCHITECTURE_VIEWS, boundaryMap, DEFAULT_ARCHITECTURE_CONFIG, matchingArchitecture,
     readArchitectureConfig, saveArchitectureConfig,
 } from './architecture-model';
 
@@ -30,6 +30,10 @@ function memoryStorage() {
 }
 
 describe('architecture workspace configuration', () => {
+    it('retains the repository views and adds separate system and behavior views', () => {
+        expect(ARCHITECTURE_VIEWS).toEqual(['overview', 'routes', 'hotspots', 'structure', 'behavior']);
+    });
+
     it('restores the chosen view and filter for each project independently', () => {
         const store = memoryStorage();
         const config = { view: 'routes' as const, filter: '/users' };
@@ -38,8 +42,38 @@ describe('architecture workspace configuration', () => {
         expect(readArchitectureConfig(store, 'other')).toEqual(DEFAULT_ARCHITECTURE_CONFIG);
     });
 
+    it('restores legacy Dependencies preferences as Overview without losing the project filter', () => {
+        const store = memoryStorage();
+        store.setItem('atlas.architecture.v1:sample', JSON.stringify({
+            version: 1, view: 'dependencies', filter: 'src/api',
+        }));
+        expect(readArchitectureConfig(store, 'sample')).toEqual({ view: 'overview', filter: 'src/api' });
+        expect(readArchitectureConfig(store, 'other')).toEqual(DEFAULT_ARCHITECTURE_CONFIG);
+    });
+
+    it('writes the canonical view even when an older caller saves Dependencies', () => {
+        const store = memoryStorage();
+        expect(saveArchitectureConfig(store, 'sample', { view: 'dependencies', filter: 'storage' })).toBe(true);
+        expect(JSON.parse(store.getItem('atlas.architecture.v1:sample')!)).toEqual({
+            version: 1, view: 'overview', filter: 'storage',
+        });
+        expect(readArchitectureConfig(store, 'sample')).toEqual({ view: 'overview', filter: 'storage' });
+    });
+
+    it('preserves a saved Entry points mode and filter within Overview', () => {
+        const store = memoryStorage();
+        store.setItem('atlas.architecture.v1:sample', JSON.stringify({
+            version: 1, view: 'entryPoints', filter: 'start',
+        }));
+        const config = readArchitectureConfig(store, 'sample');
+        expect(config).toEqual({ view: 'entryPoints', filter: 'start' });
+        expect(saveArchitectureConfig(store, 'sample', config)).toBe(true);
+        expect(readArchitectureConfig(store, 'sample')).toEqual(config);
+    });
+
     it('ignores malformed or unknown saved versions and never breaks exploration when storage is blocked', () => {
-        for (const raw of ['{', 'null', '{"view":"admin","filter":true}', '{"version":2,"view":"routes","filter":"x"}']) {
+        for (const raw of ['{', 'null', '{"view":"admin","filter":true}', '{"version":2,"view":"routes","filter":"x"}',
+            '{"version":2,"view":"dependencies","filter":"x"}', '{"version":1,"view":"dependencies","filter":true}']) {
             expect(readArchitectureConfig({ getItem: () => raw, setItem() {} }, 'sample')).toEqual(DEFAULT_ARCHITECTURE_CONFIG);
         }
         const blocked = { getItem(): never { throw new Error('blocked'); }, setItem(): never { throw new Error('blocked'); } };

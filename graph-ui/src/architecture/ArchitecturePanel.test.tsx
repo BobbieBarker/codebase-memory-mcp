@@ -6,6 +6,8 @@ import ArchitecturePanel from './ArchitecturePanel';
 import type { ArchitecturePanelProps } from './ArchitecturePanel';
 import type { ArchitectureOverviewDto } from '../core/intelligence-provider';
 import { architectureText as text } from './strings';
+vi.mock('./ArchitectureScene', () => ({ ArchitectureScene: () => <div data-testid="scene" /> }));
+vi.mock('./ContainerMap', () => ({ default: () => <div data-testid="container-map" /> }));
 
 let container: HTMLDivElement;
 let root: Root;
@@ -64,15 +66,41 @@ async function filter(value: string): Promise<void> {
 }
 
 describe('architecture workspace', () => {
-    it('keeps a spatial exploration surface across architecture, dependencies, routes and entry points', async () => {
+    it('loads system structure independently when the legacy summary is unavailable', async () => {
+        const loader = vi.fn().mockResolvedValue({ status: 'failed', generation: 'g1', error: 'System analysis service unavailable.' });
+        await render({ overview: undefined, loading: true, error: 'Legacy summary failed.', systemArchitectureLoader: loader });
+        await click('[data-view="structure"]');
+        await act(async () => { await vi.dynamicImportSettled(); });
+        expect(loader).toHaveBeenCalledWith({ project: 'sample', entryNodeId: undefined }, expect.any(AbortSignal));
+        expect(container.textContent).not.toContain('Legacy summary failed.');
+        expect(container.textContent).not.toContain(text.loading);
+        expect(container.querySelector('[data-testid="atlas-architecture"]')?.getAttribute('aria-busy')).toBe('false');
+        expect(container.textContent).toContain('System analysis service unavailable.');
+    });
+
+    it('adds system views while retaining the repository views and entry points inside Overview', async () => {
         await render({ graph: { nodes: [], edges: [], total_nodes: 0 } });
         const surface = container.querySelector('[data-testid="spatial-architecture"]');
         expect(surface).not.toBeNull();
-        for (const view of ['dependencies', 'routes', 'entryPoints']) {
+        expect([...container.querySelectorAll('[data-view]')].map(node => node.getAttribute('data-view'))).toEqual(['overview', 'routes', 'hotspots', 'structure', 'behavior']);
+        for (const view of ['hotspots', 'overview']) {
             await click(`[data-view="${view}"]`);
             expect(container.querySelector('[data-testid="spatial-architecture"]')).toBe(surface);
             expect(container.querySelector('[aria-label="Architecture relationships"]')).not.toBeNull();
         }
+        await click('[data-view="routes"]');
+        await act(async () => { await vi.dynamicImportSettled(); });
+        expect(container.querySelector('[data-testid="container-map"]')).not.toBeNull();
+        const endpoints = [...container.querySelectorAll('[aria-label="Routes perspective"] button')].find(button => button.textContent === 'Endpoints')!;
+        await act(async () => (endpoints as HTMLButtonElement).click());
+        expect(container.querySelector('[data-testid="container-map"]')).toBeNull();
+        expect(container.querySelector('[data-testid="spatial-architecture"]')).not.toBeNull();
+        expect(container.querySelector('[aria-label="Architecture relationships"]')).not.toBeNull();
+        await click('[data-view="overview"]');
+        const entry = [...container.querySelectorAll('[aria-label="Overview mode"] button')].find(button => button.textContent === 'Entry points')!;
+        await act(async () => (entry as HTMLButtonElement).click());
+        expect(container.querySelector('[data-view="overview"]')?.getAttribute('aria-pressed')).toBe('true');
+        expect(container.querySelector('select[aria-label="Entry point"]')).not.toBeNull();
     });
 
     it('keeps module, layer, community and indexed-file evidence available in Overview', async () => {
@@ -88,7 +116,6 @@ describe('architecture workspace', () => {
     it('opens a source location at the exact provider line and leaves unknown locations unlinked', async () => {
         const onNavigate = vi.fn();
         await render({ onNavigate });
-        await click('[data-view="entryPoints"]');
         await click('button[aria-label="Open source: start"]');
         expect(onNavigate).toHaveBeenCalledWith('src/api.ts', 9, 'start');
         const missing = [...container.querySelectorAll('tbody tr')].find(row => row.textContent?.includes('noLocation'));
@@ -126,25 +153,24 @@ describe('architecture workspace', () => {
     it('links the module card and keyboard-accessible dependency map to the same filter', async () => {
         await render();
         await click('button[aria-label="Show relationships for api"]');
-        expect(container.querySelector('[data-view="dependencies"]')?.getAttribute('aria-pressed')).toBe('true');
+        expect(container.querySelector('[data-view="overview"]')?.getAttribute('aria-pressed')).toBe('true');
         const target = container.querySelector<SVGGElement>('g[aria-label="Show relationships for storage"]')!;
         expect(target.getAttribute('tabindex')).toBe('0');
         await act(async () => target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
         expect(container.querySelector<HTMLInputElement>('input')?.value).toBe('storage');
-        expect(container.querySelectorAll('tbody tr')).toHaveLength(1);
+        expect(container.querySelectorAll('[data-testid="architecture-dependency-details"] tbody tr')).toHaveLength(1);
     });
 
     it('bounds the diagram while keeping every reported relationship reachable', async () => {
         const data = overview();
         data.boundaries = Array.from({ length: 30 }, (_, index) => ({ from: `module-${index}`, to: 'core', callCount: index + 1 }));
         await render({ overview: data });
-        await click('[data-view="dependencies"]');
-        expect(container.querySelectorAll('svg g[role="button"]')).toHaveLength(8);
+        expect(container.querySelectorAll('[data-testid="architecture-dependency-details"] svg g[role="button"]')).toHaveLength(8);
         expect(container.textContent).toContain(text.mapLimit(8, 23));
-        expect(container.querySelectorAll('tbody tr')).toHaveLength(24);
-        const more = [...container.querySelectorAll('button')].find(button => button.textContent === text.showMore)!;
+        expect(container.querySelectorAll('[data-testid="architecture-dependency-details"] tbody tr')).toHaveLength(24);
+        const more = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="architecture-dependency-details"] button')].find(button => button.textContent === text.showMore)!;
         await act(async () => more.click());
-        expect(container.querySelectorAll('tbody tr')).toHaveLength(30);
+        expect(container.querySelectorAll('[data-testid="architecture-dependency-details"] tbody tr')).toHaveLength(30);
     });
 
     it('distinguishes missing hotspot measurements from a measured zero', async () => {

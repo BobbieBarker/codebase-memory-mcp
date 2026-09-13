@@ -89,7 +89,7 @@ export default function SystemWorkspace({ api, onOpenProjects, active = true, ve
 
     return <section className="system-workspace" aria-label="System" hidden={!active} data-testid="system-workspace">
         <header className="system-heading">
-            <div><p className="system-eyebrow">DAEMON</p><h1>System</h1><p>Processes, indexes, and the serving daemon log.</p></div>
+            <div><p className="system-eyebrow">DAEMON</p><h1>System</h1><p>Processes, indexes, and frontend, API, and daemon events.</p></div>
             <div className="system-heading-actions">
                 {version && <span className="system-version">{version}</span>}
                 <button type="button" onClick={() => selectedReading.refresh()} disabled={selectedReading.loading}>Refresh</button>
@@ -135,7 +135,7 @@ export default function SystemWorkspace({ api, onOpenProjects, active = true, ve
 
         <div id="system-panel-logs" role="tabpanel" aria-labelledby="system-tab-logs" hidden={tab !== 'logs'}>
             <section className="system-section">
-                <div className="system-section-heading"><div><h2>Daemon log</h2><p>{report && report.selfPid > 0 ? `Serving process ${report.selfPid}` : 'Serving daemon'} · Latest 200 matching events</p></div><button type="button" disabled={(visibleRecords?.length ?? visibleLines.length) === 0} onClick={() => { void copyLogs(); }}>Copy visible</button></div>
+                <div className="system-section-heading"><div><h2>Errors and logs</h2><p>{report && report.selfPid > 0 ? `Serving process ${report.selfPid}` : 'Serving daemon'} · Latest 200 matching events</p></div><button type="button" disabled={(visibleRecords?.length ?? visibleLines.length) === 0} onClick={() => { void copyLogs(); }}>Copy visible</button></div>
                 {logs.data && <p className="system-muted">{logs.data.persistent === true ? `SQLite history · ${logs.data.retentionLimit ?? 'bounded'} event retention limit · survives daemon restarts` : 'Persistent history unavailable; this tail may not survive a restart.'} Events identify affected paths or jobs only when the daemon recorded them.</p>}
                 <div className="system-log-controls">
                     <label><span>Scope</span><select aria-label="Log scope" value={scope} onChange={(event) => setScope(event.currentTarget.value as typeof scope)}>

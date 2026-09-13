@@ -236,3 +236,14 @@
 .atlas-header .atlas-project-switcher { flex-basis: 180px; min-width: 130px; }
 @media (min-width: 1280px) { .atlas-header .atlas-workspace-tabs { margin-left: 6px; }.atlas-header .atlas-project-switcher-label { display: none; } }
 @media (max-width: 1100px) { .atlas-header:has(.atlas-project-switcher) .atlas-version { display: none; }.atlas-header .atlas-workspace-tabs button { padding-inline: 8px; } }
+
+/* Explorer keeps chat and graph in one column, with a proportional split. */
+.atlas-chat-column[data-graph=true][data-selection-inspector=false] { display: grid; overflow: hidden; grid-template-rows: minmax(0, var(--atlas-chat-fraction)) 8px minmax(0, var(--atlas-graph-fraction)); }
+.atlas-chat-column[data-graph=true][data-selection-inspector=false][data-chat-expanded=false] { grid-template-rows: auto minmax(0, 1fr); }
+.atlas-chat-column[data-graph=true][data-selection-inspector=false] > .cbm-chat-dock { min-height: 0; height: 100%; flex: initial; overflow: auto; }
+.atlas-chat-column[data-graph=true][data-selection-inspector=false][data-chat-expanded=false] > .cbm-chat-dock { height: auto; }
+.atlas-shell[data-workspace=explore] .atlas-chat-column[data-graph=true][data-selection-inspector=false] > .atlas-galaxy-host { min-height: 0; height: 100%; flex: initial; }
+.atlas-reader-details { flex: 0 1 auto; max-height: 42%; min-height: 0; overflow: auto; border-bottom: 1px solid var(--atlas-line); }
+.atlas-command-palette > .atlas-menu { padding: 12px 18px; margin: 0; border-top: 1px solid var(--atlas-line); }
+.diagnostics-inventory { margin: 18px 0; }
+.diagnostics-inventory > summary { cursor: pointer; color: var(--atlas-cyan); }
