@@ -102,12 +102,13 @@ enum { SKIP_ONE = 1, PAIR_LEN = 2 };
 
 /* Indexing from a count, not offsetting from a pointer. SKIP_ONE above answers
  * "how far do I advance past this element" (p + SKIP_ONE, tail[-SKIP_ONE]);
- * this one answers "which index is the last one". Both are 1, so nothing
- * misbehaves when they are swapped -- which is exactly why the name has to
- * carry the intent. readability-magic-numbers forbids the bare literal, so the
- * constant chosen is the only record of the question being asked:
- * `items[n - CBM_LAST_OFFSET]` reads "the last element of n". */
-enum { CBM_LAST_OFFSET = 1 };
+ * these answer "which index is the last one" and "how many are there". All
+ * three are 1, so nothing misbehaves when they are swapped -- which is exactly
+ * why the name has to carry the intent. readability-magic-numbers forbids the
+ * bare literal, so the constant chosen is the only record of the question
+ * being asked: `items[n - CBM_LAST_OFFSET]` reads "the last element of n",
+ * `n == CBM_COUNT_ONE` reads "exactly one candidate". */
+enum { CBM_LAST_OFFSET = 1, CBM_COUNT_ONE = 1 };
 
 /* ── Label allowlists for SQL ────────────────────────────────────
  * SQL mirror of cbm_label_is_type_like() (internal/cbm/helpers.c). That

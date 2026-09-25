@@ -2909,8 +2909,29 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * exact LSP target and must fail closed rather than accepting a textual
          * registry match. */
         if ((!res.qualified_name || !res.qualified_name[0]) && !call->requires_lsp_resolution) {
-            res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn, imp_keys,
-                                       imp_vals, imp_count);
+            /* The caller's own container, where the language names it in the
+             * source rather than deriving it from the path. Elixir's fetch/1
+             * lives in `proj.file.Fx.Store`, not `proj.file`, so the
+             * same-module strategy needs this to find an intra-module call at
+             * all. NULL everywhere else, which leaves resolution
+             * byte-identical for every other language. Must mirror the
+             * sequential twin (pass_calls.c) exactly. */
+            char container_buf[CBM_SZ_512];
+            const char *container_qn = NULL;
+            if (cbm_lang_container_is_source_named(lang) && call->enclosing_func_qn &&
+                (!module_qn || strcmp(call->enclosing_func_qn, module_qn) != 0) &&
+                cbm_qn_container_buf(container_buf, sizeof(container_buf),
+                                     call->enclosing_func_qn)) {
+                container_qn = container_buf;
+            }
+            /* arg_count saturates at CBM_MAX_CALL_ARGS and skips splats, so it
+             * is the written arity only below the cap. Above it the hint is
+             * withheld rather than guessed. */
+            cbm_resolve_ctx_t rx = {.container_qn = container_qn,
+                                    .arity = call->arg_count < CBM_MAX_CALL_ARGS ? call->arg_count
+                                                                                 : CBM_ARITY_NONE};
+            res = cbm_registry_resolve_ctx(rc->registry, call->callee_name, module_qn, &rx,
+                                           imp_keys, imp_vals, imp_count);
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_resolve, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
@@ -3127,12 +3148,26 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
              * resolves through the default variant, whose central relation
              * veto keeps same-named code identifiers out of the lineage layer.
              * Must mirror the sequential twin (pass_usages.c) exactly. */
+            /* The caller's own container, where the language names it in the
+             * source rather than deriving it from the path (Elixir
+             * defmodule). NULL for every other language. */
+            char container_buf[CBM_SZ_512];
+            const char *container_qn = NULL;
+            if (cbm_lang_container_is_source_named(lang) && usage->enclosing_func_qn &&
+                (!module_qn || strcmp(usage->enclosing_func_qn, module_qn) != 0) &&
+                cbm_qn_container_buf(container_buf, sizeof(container_buf),
+                                     usage->enclosing_func_qn)) {
+                container_qn = container_buf;
+            }
+            /* A usage is a reference, not an invocation: no argument list, so
+             * no arity to offer. */
+            cbm_resolve_ctx_t rx = {.container_qn = container_qn, .arity = CBM_ARITY_NONE};
             cbm_resolution_t res =
                 (lang == CBM_LANG_SQL)
                     ? cbm_registry_resolve_lineage(rc->registry, usage->ref_name, module_qn,
                                                    imp_keys, imp_vals, imp_count)
-                    : cbm_registry_resolve(rc->registry, usage->ref_name, module_qn, imp_keys,
-                                           imp_vals, imp_count);
+                    : cbm_registry_resolve_ctx(rc->registry, usage->ref_name, module_qn, &rx,
+                                               imp_keys, imp_vals, imp_count);
             if (!res.qualified_name || res.qualified_name[0] == '\0') {
                 continue;
             }
