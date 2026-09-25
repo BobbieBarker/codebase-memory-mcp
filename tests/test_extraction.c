@@ -1457,6 +1457,338 @@ TEST(extract_elixir_guarded_def_head) {
     PASS();
 }
 
+/* Every clause of an Elixir function is its own `def` call, and an Elixir QN
+ * carries neither module nor arity, so all clauses compute one qualified name
+ * and collide on a single graph node. cbm_gbuf_upsert_node ranks a same-QN
+ * collision by LARGEST start_line, so the survivor was the last clause in the
+ * file and get_code_snippet returned that clause as the whole function: a
+ * two-clause `admin?` read back as `def admin?(%__MODULE__{}), do: false` --
+ * the graph asserting a predicate that always returns false. The node has to
+ * span its own clauses, and ONLY its own: the fold is bounded to the
+ * immediately preceding definition and to the enclosing module body, so a def
+ * of another name ends the group and two same-named functions in two modules
+ * stay two nodes. */
+TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module) {
+    CBMFileResult *r = extract("defmodule Roles do\n"                       /* 1 */
+                               "  def admin?(%{role: :admin}), do: true\n"  /* 2 */
+                               "  def admin?(%{}), do: false\n"             /* 3 */
+                               "\n"                                         /* 4 */
+                               "  def promote(user), do: user\n"            /* 5 */
+                               "\n"                                         /* 6 */
+                               "  def admin?(_other), do: false\n"          /* 7 */
+                               "end\n"                                      /* 8 */
+                               "\n"                                         /* 9 */
+                               "defmodule Guests do\n"                      /* 10 */
+                               "  def admin?(:root), do: true\n"            /* 11 */
+                               "  def admin?(_any), do: false\n"            /* 12 */
+                               "end\n",                                     /* 13 */
+                               CBM_LANG_ELIXIR, "t", "roles.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* The two adjacent Roles clauses fold; the clause past `promote` is its own
+     * group; the Guests pair is a DIFFERENT function and stays its own node. */
+    ASSERT_EQ(3, count_defs_named(r, "Function", "admin?"));
+    ASSERT_EQ(1, count_defs_named(r, "Function", "promote"));
+
+    const CBMDefinition *admin[3] = {NULL, NULL, NULL};
+    const CBMDefinition *promote = NULL;
+    int seen = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Function") != 0) {
+            continue;
+        }
+        if (strcmp(r->defs.items[i].name, "admin?") == 0 && seen < 3) {
+            admin[seen++] = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "promote") == 0) {
+            promote = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(admin[0]);
+    ASSERT_NOT_NULL(admin[1]);
+    ASSERT_NOT_NULL(admin[2]);
+    ASSERT_NOT_NULL(promote);
+
+    ASSERT_EQ(2, (int)admin[0]->start_line);
+    ASSERT_EQ(3, (int)admin[0]->end_line);
+    /* separated from lines 2-3 by `promote`, so it keeps its own span */
+    ASSERT_EQ(7, (int)admin[1]->start_line);
+    ASSERT_EQ(7, (int)admin[1]->end_line);
+    /* Guests.admin? never reaches back over the module boundary */
+    ASSERT_EQ(11, (int)admin[2]->start_line);
+    ASSERT_EQ(12, (int)admin[2]->end_line);
+    ASSERT_EQ(5, (int)promote->start_line);
+    ASSERT_EQ(5, (int)promote->end_line);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A nested module is the one place where the "def of another name ends the
+ * group" rule is not enough: an Elixir QN carries no module, so `Outer.run` and
+ * `Outer.Inner.run` compute the SAME qualified name, and when Inner sits
+ * directly above Outer's own clause the two are adjacent in the extracted defs.
+ * The fold is bounded to the module body as well, so they stay two nodes. */
+TEST(extract_elixir_nested_module_clauses_do_not_fold) {
+    CBMFileResult *r = extract("defmodule Outer do\n"          /* 1 */
+                               "  defmodule Inner do\n"        /* 2 */
+                               "    def run(a), do: a\n"       /* 3 */
+                               "  end\n"                       /* 4 */
+                               "\n"                            /* 5 */
+                               "  def run(b), do: b + 1\n"     /* 6 */
+                               "end\n",                        /* 7 */
+                               CBM_LANG_ELIXIR, "t", "nested.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(2, count_defs_named(r, "Function", "run"));
+
+    const CBMDefinition *runs[2] = {NULL, NULL};
+    int seen = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Function") == 0 &&
+            strcmp(r->defs.items[i].name, "run") == 0 && seen < 2) {
+            runs[seen++] = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(runs[0]);
+    ASSERT_NOT_NULL(runs[1]);
+    ASSERT_EQ(3, (int)runs[0]->start_line);
+    ASSERT_EQ(3, (int)runs[0]->end_line);
+    ASSERT_EQ(6, (int)runs[1]->start_line);
+    ASSERT_EQ(6, (int)runs[1]->end_line);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Folding clauses has to decide is_exported for the merged node. A `def` clause
+ * and a `defp` clause of the same name AND arity are clauses of one function --
+ * a private guard clause or a nil short-circuit written above the public head
+ * is ordinary Elixir -- so is_exported is the OR over the folded clauses: the
+ * name is callable from outside if any clause exports it, and a wholly private
+ * function stays unexported. */
+TEST(extract_elixir_folded_clause_is_exported_is_the_or) {
+    CBMFileResult *r = extract("defmodule Acc do\n"                                /* 1 */
+                               "  def build(l), do: build(l)\n"                    /* 2 */
+                               "  defp build([]), do: []\n"                        /* 3 */
+                               "\n"                                                /* 4 */
+                               "  defp trim(nil), do: nil\n"                       /* 5 */
+                               "  defp trim(s), do: s\n"                           /* 6 */
+                               "end\n",                                            /* 7 */
+                               CBM_LANG_ELIXIR, "t", "acc.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(1, count_defs_named(r, "Function", "build"));
+    ASSERT_EQ(1, count_defs_named(r, "Function", "trim"));
+
+    const CBMDefinition *build = NULL;
+    const CBMDefinition *trim = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Function") != 0) {
+            continue;
+        }
+        if (strcmp(r->defs.items[i].name, "build") == 0) {
+            build = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "trim") == 0) {
+            trim = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(build);
+    ASSERT_NOT_NULL(trim);
+    ASSERT_EQ(2, (int)build->start_line);
+    ASSERT_EQ(3, (int)build->end_line);
+    ASSERT_TRUE(build->is_exported);
+    ASSERT_EQ(5, (int)trim->start_line);
+    ASSERT_EQ(6, (int)trim->end_line);
+    ASSERT_FALSE(trim->is_exported);
+    cbm_free_result(r);
+
+    /* The other direction, and the only one the `prev->is_exported ||` disjunct
+     * decides. Above, the exporting clause is the FIRST one, so a plain
+     * `prev->is_exported = is_exported` assignment would also have to lose it
+     * on the later defp -- but a last-clause-wins assignment happens to be
+     * right whenever the def comes last. Here the defp comes first and the def
+     * second, so the surviving flag can only be true if the fold ORs rather
+     * than assigns. */
+    CBMFileResult *o = extract("defmodule Ord do\n"           /* 1 */
+                               "  defp z(1), do: 1\n"         /* 2 */
+                               "  def z(2), do: 2\n"          /* 3 */
+                               "end\n",                       /* 4 */
+                               CBM_LANG_ELIXIR, "t", "ord.ex");
+    ASSERT_NOT_NULL(o);
+    ASSERT_FALSE(o->has_error);
+    ASSERT_EQ(1, count_defs_named(o, "Function", "z"));
+    const CBMDefinition *z = NULL;
+    for (int i = 0; i < o->defs.count; i++) {
+        if (strcmp(o->defs.items[i].label, "Function") == 0 &&
+            strcmp(o->defs.items[i].name, "z") == 0) {
+            z = &o->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(z);
+    ASSERT_EQ(2, (int)z->start_line);
+    ASSERT_EQ(3, (int)z->end_line);
+    ASSERT_TRUE(z->is_exported);
+    cbm_free_result(o);
+    PASS();
+}
+
+/* First definition with this name, for the Elixir clause-fold tests below.
+ * find_def() is declared much further down this file. */
+static const CBMDefinition *elixir_first_def(CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, name) == 0) {
+            return &r->defs.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* A guarded clause head is a DECLARATION of the name, never a call to it, and
+ * the call extractor has to agree with the def extractor about which node the
+ * head is. It did not: it suppressed a head only when the head node IS the
+ * def's first named argument, but `def f(x) when g` parses its whole head as a
+ * `when` binary_operator, so the inner `f(x)` was not that argument and was
+ * recorded as a call to `f`. Under the folded span that phantom lands inside
+ * the function's own node, and self-recursion is decided by line containment,
+ * so an ordinary two-clause guarded function reported itself recursive.
+ * Recursion is a load-bearing signal: `recursive` is a queryable node property
+ * and seeds the cycle detection in pass_complexity. */
+TEST(extract_elixir_guarded_clause_head_is_not_a_self_call) {
+    CBMFileResult *r = extract("defmodule Guarded do\n"                     /* 1 */
+                               "  def f(x) when is_integer(x), do: x\n"     /* 2 */
+                               "  def f(_x), do: 0\n"                       /* 3 */
+                               "\n"                                         /* 4 */
+                               "  def solo(x) when is_binary(x), do: x\n"   /* 5 */
+                               "end\n",                                     /* 6 */
+                               CBM_LANG_ELIXIR, "t", "guard_call.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* No call to either name exists anywhere in this file. */
+    ASSERT_EQ(0, count_calls_named(r, "f"));
+    ASSERT_EQ(0, count_calls_named(r, "solo"));
+    /* The guard predicate IS a real call and stays one. */
+    ASSERT_EQ(1, count_calls_named(r, "is_integer"));
+    ASSERT_EQ(1, count_calls_named(r, "is_binary"));
+
+    ASSERT_EQ(1, count_defs_named(r, "Function", "f"));
+    const CBMDefinition *f = elixir_first_def(r, "f");
+    ASSERT_NOT_NULL(f);
+    ASSERT_EQ(2, (int)f->start_line);
+    ASSERT_EQ(3, (int)f->end_line);
+    ASSERT_FALSE(f->is_recursive);
+
+    /* A single guarded clause was wrong even before the span widened: the
+     * phantom landed on its own one-line node. */
+    const CBMDefinition *solo = elixir_first_def(r, "solo");
+    ASSERT_NOT_NULL(solo);
+    ASSERT_FALSE(solo->is_recursive);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Every reference of any kind this file records for `name`, across all four
+ * extractors the unified walk runs over one subtree: a call site, a value
+ * usage, a read/write occurrence, a type reference. Suppressing a node in ONE
+ * of them does not remove a phantom reference, it moves it -- handle_calls
+ * declining a node leaves state->callee_expr unset, and handle_usages then
+ * reaches the bare identifier and mints a USAGE instead. USAGE and CALLS are
+ * separate rows in the edge table, so the relabelled phantom also escapes the
+ * UNIQUE(source,target,type) dedup that had been collapsing it onto a real
+ * call, and pass_importance counts an inbound reference that did not exist
+ * before. An assertion naming only r->calls cannot see any of that. */
+static int elixir_any_ref_count(CBMFileResult *r, const char *name) {
+    int count = count_calls_named(r, name);
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, name) == 0) {
+            count++;
+        }
+    }
+    for (int i = 0; i < r->rw.count; i++) {
+        if (r->rw.items[i].var_name && strcmp(r->rw.items[i].var_name, name) == 0) {
+            count++;
+        }
+    }
+    for (int i = 0; i < r->type_refs.count; i++) {
+        if (r->type_refs.items[i].type_name && strcmp(r->type_refs.items[i].type_name, name) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/* The head suppression has to REMOVE the phantom, not relabel it. What makes
+ * that hold for a def head is not the calls walk alone: is_elixir_def_binding
+ * in extract_usages.c already treats everything inside a def's first argument
+ * as a binding occurrence rather than a reference, so the identifier
+ * handle_calls declines is declined by handle_usages too. That agreement is the
+ * invariant under test, and it is why the counts below are over every extractor
+ * rather than over r->calls.
+ *
+ * `spec_subject` pins the boundary of this patch, and pins it as a RELATION
+ * rather than a count, because the count cannot see the defect. A typespec
+ * subject is the same shape as a def head and is NOT suppressed here: nothing
+ * in extract_usages.c treats it as a binding, so declining it in handle_calls
+ * only relabels its phantom as a USAGE. At extraction that relabel is
+ * invisible -- one reference before, one after -- and it becomes a defect
+ * downstream, where CALLS and USAGE are separate rows under
+ * UNIQUE(source,target,type) and the relabelled phantom stops colliding with
+ * the real call it used to hide behind. So the assertion is that every
+ * reference recorded for a typespec subject is a CALL and none has become a
+ * usage, a read/write or a type reference. */
+TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind) {
+    CBMFileResult *r = extract("defmodule Heads do\n"                              /* 1 */
+                               "  def guarded(x) when is_integer(x), do: x\n"      /* 2 */
+                               "  def guarded(_x), do: 0\n"                        /* 3 */
+                               "\n"                                                /* 4 */
+                               "  defp bare(x), do: x\n"                           /* 5 */
+                               "\n"                                                /* 6 */
+                               "  @spec spec_subject(integer) :: integer\n"        /* 7 */
+                               "  def spec_subject(n), do: n\n"                    /* 8 */
+                               "end\n",                                            /* 9 */
+                               CBM_LANG_ELIXIR, "t", "heads.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* Nothing in this file references `guarded` or `bare`. Not as a call, not
+     * as a value, not as a read/write, not as a type. */
+    ASSERT_EQ(0, elixir_any_ref_count(r, "guarded"));
+    ASSERT_EQ(0, elixir_any_ref_count(r, "bare"));
+    /* The guard predicate is a real call and survives as one. */
+    ASSERT_EQ(1, count_calls_named(r, "is_integer"));
+    ASSERT_EQ(1, elixir_any_ref_count(r, "is_integer"));
+    /* Declared, not suppressed here; see the comment above. Every reference
+     * this file records for a typespec subject is a CALL -- none of them has
+     * been relabelled into a usage, a read/write or a type reference. */
+    ASSERT_EQ(count_calls_named(r, "spec_subject"),
+              elixir_any_ref_count(r, "spec_subject"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The other direction: suppressing declaration heads must not blind the
+ * detector to real recursion, and folding must not lose a self-call written in
+ * a clause that is no longer the surviving one. `walk` recurses from its
+ * guarded second clause; exactly one call to `walk` is recorded (the body one,
+ * not the two heads) and the folded node is recursive. */
+TEST(extract_elixir_real_recursion_survives_head_suppression) {
+    CBMFileResult *r = extract("defmodule Rec do\n"                                        /* 1 */
+                               "  def walk([]), do: []\n"                                  /* 2 */
+                               "  def walk([h | t]) when is_integer(h), do: [h | walk(t)]\n" /* 3 */
+                               "end\n",                                                    /* 4 */
+                               CBM_LANG_ELIXIR, "t", "rec.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(1, count_calls_named(r, "walk"));
+    ASSERT_EQ(1, count_defs_named(r, "Function", "walk"));
+    const CBMDefinition *walk = elixir_first_def(r, "walk");
+    ASSERT_NOT_NULL(walk);
+    ASSERT_EQ(2, (int)walk->start_line);
+    ASSERT_EQ(3, (int)walk->end_line);
+    ASSERT_TRUE(walk->is_recursive);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* tree-sitter-elixir gives a call's arguments node no field name, so the
  * generic `arguments` field lookup returns null and first_string_arg was never
  * populated for any Elixir call — Phoenix route paths, service URLs and config
@@ -8600,6 +8932,12 @@ SUITE(extraction) {
     RUN_TEST(elixir_function);
     RUN_TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it);
     RUN_TEST(extract_elixir_guarded_def_head);
+    RUN_TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module);
+    RUN_TEST(extract_elixir_nested_module_clauses_do_not_fold);
+    RUN_TEST(extract_elixir_folded_clause_is_exported_is_the_or);
+    RUN_TEST(extract_elixir_guarded_clause_head_is_not_a_self_call);
+    RUN_TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind);
+    RUN_TEST(extract_elixir_real_recursion_survives_head_suppression);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
