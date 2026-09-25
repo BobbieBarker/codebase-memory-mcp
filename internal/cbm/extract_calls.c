@@ -725,17 +725,24 @@ static bool elixir_call_head_in(TSNode call, const char *source, const char *con
  * definition name is recorded by another as a reference to that very name:
  *   - extract_defs.c, extract_elixir_func_def, unwraps it to NAME the
  *     definition. It and this file disagreeing mints the phantom above.
- *   - extract_usages.c, is_elixir_def_binding, treats the whole first argument
- *     as a binding occurrence rather than a reference, which is what keeps a
- *     head suppressed here from re-emerging as a USAGE edge. It is deliberately
- *     WIDER than the unwrap -- it covers the guard expression too -- and that
- *     width is load-bearing: a suppression in one extractor of the unified walk
- *     only REMOVES a phantom if the others also decline the node.
- *   - extract_unified.c, compute_elixir_func_qn, resolves a def's QN for call
- *     scope tracking and does NOT unwrap, so a guarded clause pushes no
- *     function scope and its call edges are sourced from the File rather than
- *     from the enclosing Function. Pre-existing, independent of the two above
- *     (it decides edge SOURCE, not edge existence), and fixed separately.
+ *   - extract_usages.c, is_elixir_def_binding, treats an identifier inside that
+ *     head as a binding occurrence rather than a reference, which is what keeps
+ *     a head suppressed here from re-emerging as a USAGE edge: a suppression in
+ *     one extractor of the unified walk only REMOVES a phantom if the others
+ *     also decline the node. The two files ask different questions of the same
+ *     helper -- this one whether the node IS the head or a `when` wrapper above
+ *     it, that one whether the node sits INSIDE the head -- so there is one
+ *     definition of the head and they cannot drift apart. That containment
+ *     stops at the head rather than covering the whole `when` operator, which
+ *     is deliberate in the other direction: only the parameters being BOUND are
+ *     excluded, and a parameter READ in the guard is a reference, exactly as
+ *     the same read in the body is.
+ *   - extract_unified.c, compute_elixir_func_qn, resolves a def's QN to open
+ *     the function's call scope and reads the head through the same helper.
+ *     Handed the `when` operator instead it returns NULL, no scope is pushed,
+ *     and every call in a guarded body is sourced from the File rather than
+ *     from the enclosing Function. That failure is independent of the two above
+ *     because it decides edge SOURCE, not edge existence.
  *
  * Suppressing the head does not only delete edges; it moves metadata on edges
  * that SURVIVE, and that is worth stating because a caller reading an edge's
@@ -800,7 +807,23 @@ static bool call_node_is_definition_container(CBMLanguage lang, TSNode node, con
     if (lang == CBM_LANG_AGDA && strcmp(kind, "expr") == 0) {
         return agda_expr_is_definition_role(node);
     }
-    return lang == CBM_LANG_ELIXIR && strcmp(kind, "call") == 0 &&
+    /* A guarded head is a `when` binary_operator, not a `call`, and Elixir's
+     * call node types include binary_operator -- so the head reaches this walk
+     * and must be able to answer that it is a definition. A paren-less clause
+     * (`def f when g`) has no inner call at all, so the operator node itself
+     * reaches extract_callee_name and, with no callee of its own, takes that
+     * function's last resort -- the first identifier child -- minting a phantom
+     * CALLS edge onto the very function being defined.
+     *
+     * That last resort overrides a deliberate NULL for every Elixir
+     * binary_operator extract_scripting_callee declines (`=`, `<-`, `->`, `\\`,
+     * `::`, `when`), so `def g(c \\ 2)` still emits a phantom `c` and
+     * `e = target(d)` a phantom `e`. That is the pre-existing behaviour for
+     * those operators and is untouched here: only a `when` operator is
+     * admitted, so an operator definition's own head (`def a + b`) stays an
+     * ordinary node, as it was before guards were handled at all. */
+    return lang == CBM_LANG_ELIXIR &&
+           (strcmp(kind, "call") == 0 || cbm_elixir_is_when_guard(node)) &&
            elixir_call_is_definition_role(node, source);
 }
 

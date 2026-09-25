@@ -602,6 +602,11 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
     if (ts_node_is_null(first_arg)) {
         return NULL;
     }
+    /* A guard wraps the whole head in a `when` operator, so the head naming the
+     * function is its left operand. Left wrapped, this returns NULL and the def
+     * opens NO function scope: every call in a guarded body then sources to the
+     * FILE node and the function itself reports no outgoing edges. */
+    first_arg = cbm_elixir_def_head_unwrap_guard(first_arg);
     const char *fk = ts_node_type(first_arg);
     char *name = NULL;
     if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
