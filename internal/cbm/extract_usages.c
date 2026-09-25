@@ -2626,6 +2626,33 @@ void cbm_extract_usages(CBMExtractCtx *ctx) {
 // --- Unified handler: called once per node by the cursor walk ---
 // Uses WalkState flags instead of parent-chain walks for O(1) context checks.
 
+/* The qualifier a reference was written under, or NULL when unqualified.
+ *
+ * Elixir writes every qualified reference as a `dot` node -- `Keyword.get` is
+ * dot(alias "Keyword", identifier "get") -- and the usage extractor records
+ * only the identifier half, so the qualifier is destroyed before resolution
+ * ever sees it. Recovering it here is what lets receiver_chain_admits judge a
+ * usage the same way it already judges a call.
+ *
+ * Deliberately scoped to the languages whose selector shape is known here: a
+ * receiver fed to the registry changes which candidate a usage binds to, and
+ * that is a per-grammar claim, not a universal one. */
+static const char *reference_receiver(CBMExtractCtx *ctx, TSNode node) {
+    if (ctx->language != CBM_LANG_ELIXIR) {
+        return NULL;
+    }
+    TSNode parent = ts_node_parent(node);
+    if (ts_node_is_null(parent) || strcmp(ts_node_type(parent), "dot") != 0) {
+        return NULL;
+    }
+    TSNode lhs = ts_node_child(parent, 0);
+    if (ts_node_is_null(lhs) || ts_node_eq(lhs, node)) {
+        return NULL;
+    }
+    char *text = cbm_node_text(ctx->arena, lhs, ctx->source);
+    return (text && text[0]) ? text : NULL;
+}
+
 void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (emit_direct_perl_coderef_usage(ctx, node, state->enclosing_func_qn,
                                        active_lexical_scope_id(state))) {
@@ -2728,6 +2755,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
          * (field_identifier); record that shape — the name alone cannot carry
          * it, and the Go Field guard keys on it (#1962). */
         usage.is_member_access = strcmp(ts_node_type(node), "field_identifier") == 0;
+        usage.receiver = reference_receiver(ctx, node);
         stamp_usage_site(ctx, &usage, node, name, state);
         cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
     }
