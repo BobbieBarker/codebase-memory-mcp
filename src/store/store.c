@@ -4376,6 +4376,30 @@ int cbm_store_find_nodes_by_file_overlap(cbm_store_t *s, const char *project, co
 
 /* ── FindNodesByQNSuffix ───────────────────────────────────────── */
 
+/* Does this row belong in a qn-suffix result?
+ *
+ * The SQL matches three alternatives and cannot tell us which one fired. A row
+ * whose QN ends in exactly ".suffix", or equals it, matched one of the first two
+ * and is admitted whatever it contains, so an explicit lookup of the literal
+ * "add#cfg(test)" still resolves. Anything else got here through the fenced
+ * alternative, and is admitted only if cbm_qn_fence_arity agrees the tail is an
+ * arity. That keeps the store's idea of a fence identical to the MCP layer's. */
+static bool qn_suffix_row_admitted(const char *qn, const char *suffix) {
+    if (!qn || !suffix) {
+        return false;
+    }
+    size_t qlen = strlen(qn);
+    size_t slen = strlen(suffix);
+    if (qlen == slen && strcmp(qn, suffix) == 0) {
+        return true;
+    }
+    if (qlen > slen + SKIP_ONE && qn[qlen - slen - SKIP_ONE] == '.' &&
+        strcmp(qn + qlen - slen, suffix) == 0) {
+        return true;
+    }
+    return cbm_qn_fence_arity(qn) >= 0;
+}
+
 int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const char *suffix,
                                       cbm_node_t **out, int *count) {
     *out = NULL;
@@ -4383,17 +4407,44 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
-    /* Match QNs ending with ".suffix" or exactly equal to suffix */
+    /* Match QNs ending with ".suffix" or exactly equal to suffix.
+     *
+     * A QN may carry an arity fence ("...Store.fetch#3"), so a third
+     * alternative matches the fenced forms of the same dotted tail. Without it
+     * get_code_snippet("fetch") -- the bare-name convention every agent is
+     * told to use -- reaches no arity of an overloaded function at all. The
+     * '#' is matched literally: it is not a LIKE metacharacter.
+     *
+     * LIKE cannot say "digits", so that third alternative also matches a
+     * discriminator that is not an arity: rust_cfg_qualified_name mints a twin
+     * as "add#cfg(test)", and "%.add#%" matches it. cbm_qn_fence_arity is the
+     * one definition of a fence, so the row scan below applies it and drops a
+     * row that reached us only through the fenced alternative without carrying
+     * an all-digit fence. Without that filter a bare get_code_snippet("add") in
+     * a Rust project returns a node it never returned before. */
     char like_pattern[CBM_SZ_512];
-    snprintf(like_pattern, sizeof(like_pattern), "%%.%s", suffix);
+    char arity_pattern[CBM_SZ_512];
+    int lw = snprintf(like_pattern, sizeof(like_pattern), "%%.%s", suffix);
+    int aw = snprintf(arity_pattern, sizeof(arity_pattern), "%%.%s#%%", suffix);
+    if (lw < 0 || (size_t)lw >= sizeof(like_pattern) || aw < 0 ||
+        (size_t)aw >= sizeof(arity_pattern)) {
+        /* A truncated pattern loses its tail, which is the suffix being looked
+         * up, so it would match an unrelated prefix instead of missing. Refuse
+         * the query rather than answer it with the wrong nodes. */
+        *out = NULL;
+        *count = 0;
+        return CBM_STORE_OK;
+    }
 
     const char *sql_with_project =
         "SELECT id, project, label, name, qualified_name, file_path, "
         "start_line, end_line, properties FROM nodes "
-        "WHERE project = ?1 AND (qualified_name LIKE ?2 OR qualified_name = ?3)";
+        "WHERE project = ?1 AND (qualified_name LIKE ?2 OR qualified_name = ?3 "
+        "OR qualified_name LIKE ?4)";
     const char *sql_any = "SELECT id, project, label, name, qualified_name, file_path, "
                           "start_line, end_line, properties FROM nodes "
-                          "WHERE (qualified_name LIKE ?1 OR qualified_name = ?2)";
+                          "WHERE (qualified_name LIKE ?1 OR qualified_name = ?2 "
+                          "OR qualified_name LIKE ?3)";
 
     sqlite3_stmt *stmt = NULL;
     int rc =
@@ -4407,9 +4458,11 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
         bind_text(stmt, SKIP_ONE, project);
         bind_text(stmt, ST_COL_2, like_pattern);
         bind_text(stmt, ST_COL_3, suffix);
+        bind_text(stmt, ST_COL_4, arity_pattern);
     } else {
         bind_text(stmt, SKIP_ONE, like_pattern);
         bind_text(stmt, ST_COL_2, suffix);
+        bind_text(stmt, ST_COL_3, arity_pattern);
     }
 
     int cap = ST_INIT_CAP_8;
@@ -4423,6 +4476,10 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
         }
         memset(&nodes[n], 0, sizeof(cbm_node_t));
         scan_node(stmt, &nodes[n]);
+        if (!qn_suffix_row_admitted(nodes[n].qualified_name, suffix)) {
+            cbm_node_free_fields(&nodes[n]); /* fields only: the array is still ours */
+            continue;
+        }
         n++;
     }
     if (scan_rc8 != SQLITE_DONE) { /* SCANCHK:8:stmt */

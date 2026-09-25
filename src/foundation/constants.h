@@ -7,6 +7,9 @@
 #ifndef CBM_CONSTANTS_H
 #define CBM_CONSTANTS_H
 
+#include <stdlib.h> /* strtol, for cbm_qn_fence_arity below */
+#include <string.h> /* strrchr, same */
+
 /* ── Allocation counts ───────────────────────────────────────── */
 enum { CBM_ALLOC_ONE = 1 }; /* calloc(CBM_ALLOC_ONE, sizeof(T)) */
 
@@ -102,12 +105,13 @@ enum { SKIP_ONE = 1, PAIR_LEN = 2 };
 
 /* Indexing from a count, not offsetting from a pointer. SKIP_ONE above answers
  * "how far do I advance past this element" (p + SKIP_ONE, tail[-SKIP_ONE]);
- * this one answers "which index is the last one". Both are 1, so nothing
- * misbehaves when they are swapped -- which is exactly why the name has to
- * carry the intent. readability-magic-numbers forbids the bare literal, so the
- * constant chosen is the only record of the question being asked:
- * `items[n - CBM_LAST_OFFSET]` reads "the last element of n". */
-enum { CBM_LAST_OFFSET = 1 };
+ * these answer "which index is the last one" and "how many are there". All
+ * three are 1, so nothing misbehaves when they are swapped -- which is exactly
+ * why the name has to carry the intent. readability-magic-numbers forbids the
+ * bare literal, so the constant chosen is the only record of the question
+ * being asked: `items[n - CBM_LAST_OFFSET]` reads "the last element of n",
+ * `n == CBM_COUNT_ONE` reads "exactly one candidate". */
+enum { CBM_LAST_OFFSET = 1, CBM_COUNT_ONE = 1 };
 
 /* ── Label allowlists for SQL ────────────────────────────────────
  * SQL mirror of cbm_label_is_type_like() (internal/cbm/helpers.c). That
@@ -126,5 +130,29 @@ enum { CBM_LAST_OFFSET = 1 };
 /* SQL mirror of cbm_label_is_relation() (Table/View/Model — data-lineage
  * nodes), pinned by tests/test_store_nodes.c the same way as the sets above. */
 #define CBM_SQL_RELATION_LABELS "'Table','View','Model'"
+
+/* The arity a QN's fence carries ("Mod.fetch#3" -> 3), or CBM_ARITY_NONE when it
+ * carries none. ONLY an all-digit tail counts, so rust_cfg_qualified_name's twin
+ * "add#cfg(test)" reports CBM_ARITY_NONE. This lives here, next to the constant
+ * it returns, because three translation units in three layers need the same
+ * answer and had grown three copies of it: the registry (a pipeline TU that
+ * deliberately does not pull in the extraction header), the MCP handler, and the
+ * store's suffix query. A store that matched a fence the MCP layer did not
+ * recognise is exactly the disagreement this removes. */
+static inline int cbm_qn_fence_arity(const char *qn) {
+    if (!qn) {
+        return CBM_ARITY_NONE;
+    }
+    const char *hash = strrchr(qn, '#');
+    if (!hash || !hash[SKIP_ONE]) {
+        return CBM_ARITY_NONE;
+    }
+    for (const char *p = hash + SKIP_ONE; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            return CBM_ARITY_NONE;
+        }
+    }
+    return (int)strtol(hash + SKIP_ONE, NULL, CBM_DECIMAL_BASE);
+}
 
 #endif /* CBM_CONSTANTS_H */
