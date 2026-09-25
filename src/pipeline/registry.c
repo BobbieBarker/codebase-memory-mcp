@@ -922,27 +922,32 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     cbm_ht_set(r->exact, strdup(qualified_name), (void *)interned);
     const char *owned_qn = cbm_ht_get_key(r->exact, qualified_name);
 
-    /* Index the symbol under the name its caller passed AND under the QN's
-     * last dot segment, whenever the two differ.
+    /* Index the symbol under the QN's last dot segment, and additionally under
+     * the name its caller passed when that segment carries a '#' fence.
      *
-     * Neither key alone covers every language, because the two disagree in
-     * both directions. A QN can carry a discriminator the name does not: a
-     * Rust cfg twin is minted as "add#cfg(test)" (rust_cfg_qualified_name)
-     * and simple_name() has no '#' handling, so the derived key alone filed
-     * that function under the literal string "add#cfg(test)", where no bare
-     * `add` callee could reach it. A name can equally carry dots the QN's
-     * tail drops: an HCL block names itself "resource.aws_instance.web"
-     * (find_hcl_block_name) and a TOML dotted table key names itself
-     * "tool.poetry.dependencies", so the passed key alone loses the tail
-     * lookup that an `aws_instance.web.id` reference resolves through.
+     * The derived key is the one every language has always used and it stays
+     * unconditional, so a grammar whose QNs carry no '#' is byte-identical to
+     * before this commit. The second key exists for one shape: a fenced tail is
+     * a literal string no bare callee is ever written as. rust_cfg_qualified_name
+     * mints a `#[cfg(test)]` twin as "proj.lib.add#cfg(test)", simple_name() has
+     * no '#' handling, so the derived key filed that function under the whole
+     * string "add#cfg(test)" where no bare `add` callee could reach it.
+     *
+     * Gating on the fence rather than on the file's language is what makes
+     * "unchanged for every other grammar" checkable instead of asserted. Every
+     * by-name lookup keys through simple_name(), which splits on '.' and "::"
+     * only, so a passed name that differs from the derived key by anything
+     * OTHER than a fence is a key no lookup can reach: an HCL block's
+     * "resource.aws_instance.web" and a TOML table's "tool.poetry.dependencies"
+     * are both already indexed under the tail a reference spells, and adding
+     * their dotted form would only widen the bucket the scorer walks.
      *
      * `name` is NULL or empty only for callers that have no symbol name to
      * give; those have the derived key and nothing else. */
     const char *derived = simple_name(qualified_name);
-    const char *given = (name && name[0]) ? name : derived;
-    index_under_name(r, given, owned_qn);
-    if (strcmp(given, derived) != 0) {
-        index_under_name(r, derived, owned_qn);
+    index_under_name(r, derived, owned_qn);
+    if (name && name[0] && strchr(derived, '#') && strcmp(name, derived) != 0) {
+        index_under_name(r, name, owned_qn);
     }
 }
 

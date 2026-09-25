@@ -27,6 +27,7 @@ enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "foundation/limits.h"
 #include "foundation/str_util.h"
 #include "cbm.h"
+#include "helpers.h" /* cbm_lang_container_is_source_named */
 #include "arena.h"
 #include "iris_export_xml.h"
 #include "simhash/minhash.h"
@@ -320,7 +321,8 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
 }
 
 /* Process one definition: create node, register, DEFINES + DEFINES_METHOD edges. */
-static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel) {
+static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel,
+                        CBMLanguage lang) {
     if (!def->qualified_name || !def->name) {
         return;
     }
@@ -343,7 +345,28 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
         cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, node_id, "DEFINES", "{}");
     }
     free(file_qn);
-    if (def->parent_class && def->label && strcmp(def->label, "Method") == 0) {
+    /* Containment: a definition that names its container earns a
+     * Class -> member edge. The gate was label == "Method" alone, which is
+     * why a language whose members are labelled Function (Elixir's defs) had
+     * NO containment edge at all -- module membership existed only as a QN
+     * prefix. Relabelling those to Method would put a falsehood in the label
+     * column to satisfy an edge condition; label is read by the FTS rank
+     * boost, cbm_label_is_registry_symbol, cbm_label_is_type_like and the
+     * search label filter. Widening the gate is the smaller blast radius:
+     * every other site in extract_defs.c that sets parent_class on a callable
+     * already labels it Method, so this adds edges for Function members only.
+     * (Elixir's container is labelled Class, which is wrong -- a module is not
+     * a class -- and is out of scope here.) */
+    /* The Function arm is gated on the language, not applied to every grammar.
+     * extract_elixir_func_def is the only producer of a (parent_class, label ==
+     * "Function") pair in the tree today, so the gate changes no edge now; it is
+     * here so a future grammar that starts labelling members Function does not
+     * silently acquire containment edges on this path. Both this and the
+     * parallel twin in pass_parallel.c must carry the same gate, or a full index
+     * and an incremental one disagree. */
+    if (def->parent_class && def->label &&
+        (strcmp(def->label, "Method") == 0 ||
+         (cbm_lang_container_is_source_named(lang) && strcmp(def->label, "Function") == 0))) {
         const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
         if (parent && node_id > 0) {
             cbm_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
@@ -859,7 +882,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
 
         /* Create nodes for each definition */
         for (int d = 0; d < result->defs.count; d++) {
-            process_def(ctx, &result->defs.items[d], rel);
+            process_def(ctx, &result->defs.items[d], rel, lang);
             total_defs++;
         }
 
