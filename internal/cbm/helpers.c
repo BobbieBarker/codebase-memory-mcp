@@ -1271,9 +1271,56 @@ static const char *func_node_name(CBMArena *a, TSNode func_node, const char *sou
     return NULL;
 }
 
+static const char *elixir_def_head_raw(CBMArena *a, TSNode node, const char *source,
+                                       int *out_arity);
+static const char *elixir_module_head_raw(CBMArena *a, TSNode node, const char *source);
+
+/* Elixir has no class_node_types and every construct is a `call`, so the
+ * generic chain walk below cannot find the enclosing defmodule and
+ * cbm_find_enclosing_func would stop at the nearest `call` of any kind. Walk
+ * the ancestors here: the nearest def head names the function, and every
+ * defmodule above it contributes a container segment. Must agree byte for byte
+ * with extract_elixir_func_def()'s QN or the TYPE_REF/dbt edges it sources
+ * land on the file's Module node instead. */
+static const char *elixir_enclosing_func_qn(CBMArena *a, TSNode node, const char *source,
+                                            const char *project, const char *rel_path,
+                                            const char *module_qn) {
+    const char *name = NULL;
+    int arity = 0;
+    const char *container = NULL;
+    for (TSNode cur = node; !ts_node_is_null(cur); cur = ts_node_parent(cur)) {
+        if (strcmp(ts_node_type(cur), "call") != 0) {
+            continue;
+        }
+        if (!name) {
+            name = elixir_def_head_raw(a, cur, source, &arity);
+            if (name) {
+                continue;
+            }
+        }
+        const char *mod = elixir_module_head_raw(a, cur, source);
+        if (mod) {
+            container = container ? cbm_arena_sprintf(a, "%s.%s", mod, container) : mod;
+        }
+    }
+    if (!name) {
+        return module_qn;
+    }
+    const char *container_qn = container ? cbm_fqn_compute(a, project, rel_path, container) : NULL;
+    char *base = container_qn ? cbm_arena_sprintf(a, "%s.%s", container_qn, name)
+                              : cbm_fqn_compute(a, project, rel_path, name);
+    if (!base) {
+        return module_qn;
+    }
+    return cbm_fqn_with_arity(a, base, arity);
+}
+
 const char *cbm_enclosing_func_qn(CBMArena *a, TSNode node, CBMLanguage lang, const char *source,
                                   const char *project, const char *rel_path,
                                   const char *module_qn) {
+    if (lang == CBM_LANG_ELIXIR) {
+        return elixir_enclosing_func_qn(a, node, source, project, rel_path, module_qn);
+    }
     TSNode func_node = cbm_find_enclosing_func(node, lang);
     if (ts_node_is_null(func_node)) {
         return module_qn;
@@ -1721,6 +1768,202 @@ char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {
     }
     *out = '\0';
     return buf;
+}
+
+/* ── QN discriminators ──────────────────────────────────────────── */
+
+char *cbm_fqn_with_arity(CBMArena *a, const char *qn, int arity) {
+    if (!qn || arity < 0) {
+        return (char *)qn;
+    }
+    return cbm_arena_sprintf(a, "%s#%d", qn, arity);
+}
+
+/* The fence, if any, is the LAST '#' followed by one or more digits and
+ * nothing else. Returns a pointer to that '#', or NULL. */
+static const char *qn_arity_fence(const char *qn) {
+    if (!qn) {
+        return NULL;
+    }
+    const char *hash = strrchr(qn, '#');
+    if (!hash || !hash[SKIP_ONE]) {
+        return NULL;
+    }
+    for (const char *p = hash + SKIP_ONE; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            return NULL;
+        }
+    }
+    return hash;
+}
+
+size_t cbm_qn_strip_arity(char *out, size_t cap, const char *qn) {
+    if (!out || cap == 0) {
+        return 0;
+    }
+    if (!qn) {
+        out[0] = '\0';
+        return 0;
+    }
+    const char *hash = qn_arity_fence(qn);
+    size_t len = hash ? (size_t)(hash - qn) : strlen(qn);
+    if (len > cap - SKIP_ONE) {
+        len = cap - SKIP_ONE;
+    }
+    memcpy(out, qn, len);
+    out[len] = '\0';
+    return len;
+}
+
+bool cbm_qn_container_buf(char *out, size_t cap, const char *qn) {
+    if (!out || cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (!qn) {
+        return false;
+    }
+    const char *hash = qn_arity_fence(qn);
+    const char *end_ptr = hash ? hash : qn + strlen(qn);
+    const char *dot = NULL;
+    for (const char *p = qn; p < end_ptr; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (!dot || dot == qn) {
+        return false;
+    }
+    size_t len = (size_t)(dot - qn);
+    if (len > cap - SKIP_ONE) {
+        return false;
+    }
+    memcpy(out, qn, len);
+    out[len] = '\0';
+    return true;
+}
+
+/* ── Elixir def-head resolution ─────────────────────────────────── */
+
+/* Position of a call's `arguments` node when the grammar names no field: the
+ * head is child 0, its argument list child 1. */
+enum { ELIXIR_ARGS_CHILD_IDX = 1 };
+
+/* The `arguments` node of an Elixir `call`, by field or by position. */
+static TSNode elixir_args_of(TSNode node) {
+    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(args) && ts_node_child_count(node) > ELIXIR_ARGS_CHILD_IDX) {
+        args = ts_node_child(node, ELIXIR_ARGS_CHILD_IDX);
+    }
+    return args;
+}
+
+/* The text of a call's head (its first child), or NULL. */
+static char *elixir_call_head_text(CBMArena *a, TSNode node, const char *source) {
+    if (ts_node_child_count(node) == 0) {
+        return NULL;
+    }
+    TSNode head = ts_node_child(node, 0);
+    if (ts_node_is_null(head)) {
+        return NULL;
+    }
+    return cbm_node_text(a, head, source);
+}
+
+static const char *elixir_def_head_raw(CBMArena *a, TSNode node, const char *source,
+                                       int *out_arity) {
+    if (out_arity) {
+        *out_arity = 0;
+    }
+    char *macro = elixir_call_head_text(a, node, source);
+    if (!macro || (strcmp(macro, "def") != 0 && strcmp(macro, "defp") != 0 &&
+                   strcmp(macro, "defmacro") != 0 && strcmp(macro, "defmacrop") != 0)) {
+        return NULL;
+    }
+    TSNode args = elixir_args_of(node);
+    if (ts_node_is_null(args) || ts_node_child_count(args) == 0) {
+        return NULL;
+    }
+    TSNode first_arg = ts_node_child(args, 0);
+    if (ts_node_is_null(first_arg)) {
+        return NULL;
+    }
+    /* `def name(args) when guard` parses the whole head as a `when`
+     * binary_operator, so the name lives on its left operand. Without this
+     * unwrap every guarded clause is dropped, and a function whose clauses ALL
+     * carry guards never appears in the graph -- silently, since a missing
+     * definition is not an error. The unwrap is shared with the calls and
+     * usages walks, which read this same argument to tell a head from an
+     * invocation and to bound the head's bindings; a private copy in one of
+     * them makes the rest disagree about what a guarded clause is. It peels
+     * only `when`, so an operator definition (`def a + b`) is left alone rather
+     * than named after its left parameter. */
+    first_arg = cbm_elixir_def_head_unwrap_guard(first_arg);
+
+    const char *fk = ts_node_type(first_arg);
+    char *name = NULL;
+    if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
+        name = cbm_node_text(a, ts_node_child(first_arg, 0), source);
+        if (out_arity) {
+            TSNode head_args = elixir_args_of(first_arg);
+            *out_arity = ts_node_is_null(head_args) ? 0 : (int)ts_node_named_child_count(head_args);
+        }
+    } else if (strcmp(fk, "identifier") == 0) {
+        /* `def foo do` / `def foo, do: ...` -- a bare identifier head is arity 0. */
+        name = cbm_node_text(a, first_arg, source);
+    }
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    return name;
+}
+
+const char *cbm_elixir_def_head(CBMExtractCtx *ctx, TSNode node, int *out_arity) {
+    return elixir_def_head_raw(ctx->arena, node, ctx->source, out_arity);
+}
+
+static const char *elixir_module_head_raw(CBMArena *a, TSNode node, const char *source) {
+    char *macro = elixir_call_head_text(a, node, source);
+    if (!macro || strcmp(macro, "defmodule") != 0) {
+        return NULL;
+    }
+    TSNode args = elixir_args_of(node);
+    if (ts_node_is_null(args)) {
+        return NULL;
+    }
+    TSNode name_node = ts_node_child(args, 0);
+    if (ts_node_is_null(name_node)) {
+        return NULL;
+    }
+    char *name = cbm_node_text(a, name_node, source);
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    return name;
+}
+
+const char *cbm_elixir_module_head(CBMExtractCtx *ctx, TSNode node) {
+    return elixir_module_head_raw(ctx->arena, node, ctx->source);
+}
+
+char *cbm_elixir_def_qn(CBMExtractCtx *ctx, const char *container_qn, const char *name, int arity) {
+    CBMArena *a = ctx->arena;
+    char *base = container_qn ? cbm_arena_sprintf(a, "%s.%s", container_qn, name)
+                              : cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    if (!base || arity < 0 || !cbm_lang_overloads_by_arity(ctx->language)) {
+        return base;
+    }
+    return cbm_fqn_with_arity(a, base, arity);
+}
+
+/* ── Language traits ────────────────────────────────────────────── */
+
+bool cbm_lang_container_is_source_named(CBMLanguage lang) {
+    return lang == CBM_LANG_ELIXIR;
+}
+
+bool cbm_lang_overloads_by_arity(CBMLanguage lang) {
+    return lang == CBM_LANG_ELIXIR;
 }
 
 /* ── String literal classifier ──────────────────────────────────── */

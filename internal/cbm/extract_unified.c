@@ -580,44 +580,32 @@ static const char *compute_lisp_func_qn(CBMExtractCtx *ctx, TSNode node) {
  * `call` node whose target (first child) is the def macro and whose first
  * argument is either the function head call `name(args)` or a bare identifier
  * (zero-arg). Returns NULL for a non-def `call` (e.g. the in-body `add(x,1)`
- * call, whose target is not a def macro) so only defs push a scope. Mirrors
- * extract_elixir_func_def() in extract_defs.c. */
-static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
-    if (ts_node_child_count(node) == 0) {
+ * call, whose target is not a def macro) so only defs push a scope.
+ *
+ * The name, arity and QN composition come from cbm_elixir_def_head /
+ * cbm_elixir_def_qn, the SAME helpers extract_elixir_func_def() uses on the
+ * def side. They must produce a byte-identical string: calls_find_source()
+ * joins a call to its source node by exact QN and falls back to the File node
+ * on a miss, so a one-segment disagreement silently reattributes every edge
+ * sourced inside an Elixir function. Two hand-written copies had already
+ * drifted -- only the def side unwrapped the `when` guard. */
+static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node, WalkState *state) {
+    int arity = 0;
+    const char *name = cbm_elixir_def_head(ctx, node, &arity);
+    if (!name) {
         return NULL;
     }
-    char *macro = cbm_node_text(ctx->arena, ts_node_child(node, 0), ctx->source);
-    if (!macro || (strcmp(macro, "def") != 0 && strcmp(macro, "defp") != 0 &&
-                   strcmp(macro, "defmacro") != 0)) {
+    return cbm_elixir_def_qn(ctx, state ? state->enclosing_class_qn : NULL, name, arity);
+}
+
+/* The QN of an Elixir `defmodule` head, for the class scope its body runs in.
+ * Mirrors emit_elixir_module_class() in extract_defs.c. */
+static const char *compute_elixir_module_qn(CBMExtractCtx *ctx, TSNode node, WalkState *state) {
+    const char *name = cbm_elixir_module_head(ctx, node);
+    if (!name) {
         return NULL;
     }
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
-        args = ts_node_child(node, 1);
-    }
-    if (ts_node_is_null(args) || ts_node_child_count(args) == 0) {
-        return NULL;
-    }
-    TSNode first_arg = ts_node_child(args, 0);
-    if (ts_node_is_null(first_arg)) {
-        return NULL;
-    }
-    /* A guard wraps the whole head in a `when` operator, so the head naming the
-     * function is its left operand. Left wrapped, this returns NULL and the def
-     * opens NO function scope: every call in a guarded body then sources to the
-     * FILE node and the function itself reports no outgoing edges. */
-    first_arg = cbm_elixir_def_head_unwrap_guard(first_arg);
-    const char *fk = ts_node_type(first_arg);
-    char *name = NULL;
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
-        name = cbm_node_text(ctx->arena, ts_node_child(first_arg, 0), ctx->source);
-    } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(ctx->arena, first_arg, ctx->source);
-    }
-    if (!name || !name[0]) {
-        return NULL;
-    }
-    return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    return cbm_elixir_def_qn(ctx, state ? state->enclosing_class_qn : NULL, name, CBM_ARITY_NONE);
 }
 
 /* Resolve a CFML tag-function's QN for scope tracking. A <cffunction name="foo">
@@ -980,7 +968,7 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
     /* Elixir: def/defp/defmacro are `call` nodes (so is every in-body call).
      * Gate on the def-macro target text so only definitions push a scope. */
     if (ctx->language == CBM_LANG_ELIXIR) {
-        return compute_elixir_func_qn(ctx, node);
+        return compute_elixir_func_qn(ctx, node, state);
     }
 
     /* Objective-C: a method_definition's selector keyword is a plain `identifier`
@@ -2496,7 +2484,22 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
                 }
             }
         }
-        if (!skip_nested) {
+        /* Elixir: `defmodule` is a `call`, and `call` is in elixir_func_types,
+         * so a module head reaches this branch and compute_func_qn correctly
+         * returns NULL for it -- but the class branch below is then never
+         * tried, and no module scope is ever pushed. Push it here, so a def's
+         * call-scope QN carries the same container segment the def node does.
+         * cbm_is_namespace_scope_kind cannot do this: it takes the type string
+         * only and every Elixir construct is a `call`. */
+        bool elixir_module_scope = false;
+        if (!skip_nested && ctx->language == CBM_LANG_ELIXIR) {
+            const char *mqn = compute_elixir_module_qn(ctx, node, state);
+            if (mqn) {
+                push_lexical_scope(state, SCOPE_CLASS, depth, mqn, node, CBM_LEXICAL_SCOPE_CLASS);
+                elixir_module_scope = true;
+            }
+        }
+        if (!skip_nested && !elixir_module_scope) {
             const char *fqn = compute_func_qn(ctx, node, spec, state);
             if (fqn && push_function_scope(state, depth, fqn, node)) {
                 const char *node_kind = ts_node_type(node);

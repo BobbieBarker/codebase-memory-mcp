@@ -1498,15 +1498,17 @@ TEST(extract_elixir_guarded_def_head) {
     PASS();
 }
 
-/* A guard hides the head from the scope walk and from the calls walk.
- * compute_elixir_func_qn accepts only a `call` or an `identifier` as a def's
- * first argument, so a guarded clause resolved no QN and opened NO function
- * scope: every call in its body was attributed to the FILE node, the function
- * reported no outgoing edges, and its callees gained an in-edge from the file
- * instead of from their caller. A paren-less guarded clause (`def f when g`) is
- * worse still: it has no inner call node at all, so the guard operator itself
- * falls through to extract_callee_name's first-identifier last resort and mints
- * a phantom CALLS edge naming the function being defined. */
+/* The other half of the guarded-head defect: extracting the def is not enough,
+ * because the guard also hides the head from the calls walk and from the scope
+ * walk. Unrecognised as a definition, the head was emitted as a real invocation
+ * -- a phantom CALLS edge naming the function being defined -- and by two
+ * different routes. `def f(a) when g` reaches the calls walk as the inner
+ * `f(a)` call, which no longer compares equal to the def's first argument;
+ * `def f when g` has no inner call at all, so the guard operator itself falls
+ * through to the generic first-identifier fallback and mints the phantom from
+ * the bare name. Opening no function scope, every call in a guarded body was
+ * attributed to the FILE node, so the function reported no outgoing edges and
+ * its callees gained an in-edge from the file instead of from their caller. */
 TEST(extract_elixir_guarded_def_head_scope) {
     CBMFileResult *r = extract("defmodule Guards do\n"
                                "  def target(x), do: x\n"
@@ -1522,41 +1524,46 @@ TEST(extract_elixir_guarded_def_head_scope) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
 
-    /* A paren-less guarded head is a definition, never a call to itself. */
+    /* A guarded head is a definition, never a call to itself -- in either shape. */
+    ASSERT_EQ(count_calls_named(r, "guarded_caller"), 0);
     ASSERT_EQ(count_calls_named(r, "bare_guarded"), 0);
 
     /* Both calls in the guarded body source to the guarded function, and the
-     * paren-less clause's body call to that clause. */
-    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.guarded_caller"), 1);
-    ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope.guarded_caller"), 1);
-    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.bare_guarded"), 1);
+     * paren-less clause's body call to that clause. The scope QN carries the
+     * module and the arity, exactly as the def QN does; a disagreement of one
+     * segment would leave these at 0 and the file-node assertions below at 1. */
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.Guards.guarded_caller#1"), 1);
+    ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope.Guards.guarded_caller#1"), 1);
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.Guards.bare_guarded#0"), 1);
 
     /* Control on the path the fix does not touch: an unguarded clause still
      * sources its body call to itself. This is NOT a leak detector -- the walk
      * expires scopes by tree depth (pop_expired_scopes), so a sibling clause
      * always unwinds the previous one before pushing its own and "pushed but
      * never popped" is not a state this walk can reach. */
-    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.unguarded_caller"), 1);
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.Guards.unguarded_caller#1"), 1);
 
-    /* Nothing falls back to the file node. */
+    /* Nothing falls back to the file node or stops at the module scope. */
     ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope"), 0);
     ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope"), 0);
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.Guards"), 0);
+    ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope.Guards"), 0);
 
     cbm_free_result(r);
     PASS();
 }
 
-/* The half the calls and scope assertions above cannot see: the usages walk
- * asks whether an identifier sits inside the def's SIGNATURE, and treats
- * everything that does as part of the binding rather than as a reference. A
- * guard makes that signature the whole `when` operator, which spans the guard
- * expression too -- so `a` read by `is_binary(a)` was classified as its own
- * binding and emitted no USAGE row at all. A guard is an expression, not a
- * pattern: the parameters are bound by `guarded(a, b)` and every mention of one
- * to its right is a read, exactly as the same mention in the body already is.
- * Unwrapping the signature to the head restores those rows without admitting
- * the binding sites themselves, which is why each name is asserted both within
- * its scope and in total. */
+/* The third half of the guarded-head defect, and the one the calls and defs
+ * assertions above cannot see: the usages walk asks whether an identifier sits
+ * inside the def's SIGNATURE, and treats everything that does as part of the
+ * binding rather than as a reference. A guard makes that signature the whole
+ * `when` operator, which spans the guard expression too -- so `a` read by
+ * `is_binary(a)` was classified as its own binding and emitted no USAGE row at
+ * all. A guard is an expression, not a pattern: the parameters are bound by
+ * `guarded(a, b)` and every mention of one to its right is a read, exactly as
+ * the same mention in the body already is. Unwrapping the signature to the head
+ * restores those rows without admitting the binding sites themselves, which is
+ * why each name is asserted both within its scope and in total. */
 TEST(extract_elixir_guarded_def_head_guard_usages) {
     CBMFileResult *r = extract("defmodule GuardUsage do\n"
                                "  def plain(x), do: x\n"
@@ -1569,35 +1576,35 @@ TEST(extract_elixir_guarded_def_head_guard_usages) {
     ASSERT_FALSE(r->has_error);
 
     /* Both guard reads of the parameter are usages of the guarded clause. */
-    ASSERT_EQ(count_usages_from(r, "a", "t.guard_usage.guarded"), 2);
+    ASSERT_EQ(count_usages_from(r, "a", "t.guard_usage.GuardUsage.guarded#2"), 2);
     /* ...and nothing else claims `a`: the `a` in `guarded(a, b)` binds it. */
     ASSERT_EQ(count_usages_named(r, "a"), 2);
 
     /* The body read is unchanged, and the head's `b` is still a binding --
      * an unwrap that took the guard instead of the head would add both head
      * parameters here. */
-    ASSERT_EQ(count_usages_from(r, "b", "t.guard_usage.guarded"), 1);
+    ASSERT_EQ(count_usages_from(r, "b", "t.guard_usage.GuardUsage.guarded#2"), 1);
     ASSERT_EQ(count_usages_named(r, "b"), 1);
 
     /* Control: an unguarded clause was never affected either way. */
-    ASSERT_EQ(count_usages_from(r, "x", "t.guard_usage.plain"), 1);
+    ASSERT_EQ(count_usages_from(r, "x", "t.guard_usage.GuardUsage.plain#1"), 1);
     ASSERT_EQ(count_usages_named(r, "x"), 1);
 
     cbm_free_result(r);
     PASS();
 }
 
-/* Every clause of an Elixir function is its own `def` call, and an Elixir QN
- * carries neither module nor arity, so all clauses compute one qualified name
- * and collide on a single graph node. cbm_gbuf_upsert_node ranks a same-QN
- * collision by LARGEST start_line, so the survivor was the last clause in the
- * file and get_code_snippet returned that clause as the whole function: a
- * two-clause `admin?` read back as `def admin?(%__MODULE__{}), do: false` --
- * the graph asserting a predicate that always returns false. The node has to
- * span its own clauses, and ONLY its own: the fold is bounded to the
- * immediately preceding definition and to the enclosing module body, so a def
- * of another name ends the group and two same-named functions in two modules
- * stay two nodes. */
+/* Every clause of an Elixir function is its own `def` call, so a multi-clause
+ * function pushes one definition per clause, all carrying the same
+ * (module, name, arity) QN and colliding on one graph node.
+ * cbm_gbuf_upsert_node ranks a same-QN collision by LARGEST start_line, so the
+ * survivor was the last clause in the file and get_code_snippet returned that
+ * clause as the whole function: a two-clause `admin?` read back as
+ * `def admin?(%{})... false` -- the graph asserting a predicate that always
+ * returns false. The node has to span its own clauses, and ONLY its own: the
+ * fold is bounded to the immediately preceding definition and to the enclosing
+ * body block, so a def of another name ends the group and two same-named
+ * functions in two modules stay two nodes. */
 TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module) {
     CBMFileResult *r = extract("defmodule Roles do\n"                       /* 1 */
                                "  def admin?(%{role: :admin}), do: true\n"  /* 2 */
@@ -1647,17 +1654,47 @@ TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module) {
     /* Guests.admin? never reaches back over the module boundary */
     ASSERT_EQ(11, (int)admin[2]->start_line);
     ASSERT_EQ(12, (int)admin[2]->end_line);
+    ASSERT_STR_EQ("t.roles.Roles.admin?#1", admin[0]->qualified_name);
+    ASSERT_STR_EQ("t.roles.Guests.admin?#1", admin[2]->qualified_name);
     ASSERT_EQ(5, (int)promote->start_line);
     ASSERT_EQ(5, (int)promote->end_line);
     cbm_free_result(r);
     PASS();
 }
 
-/* A nested module is the one place where the "def of another name ends the
- * group" rule is not enough: an Elixir QN carries no module, so `Outer.run` and
- * `Outer.Inner.run` compute the SAME qualified name, and when Inner sits
- * directly above Outer's own clause the two are adjacent in the extracted defs.
- * The fold is bounded to the module body as well, so they stay two nodes. */
+/* Two arities of one name are two functions, not clauses of one, and the QN is
+ * the fold key -- so a widened span must never reach across them. `get/1` and
+ * `get/2` written adjacently keep their own spans and their own is_exported. */
+TEST(extract_elixir_clauses_of_different_arity_do_not_fold) {
+    CBMFileResult *r = extract("defmodule Fetcher do\n"                 /* 1 */
+                               "  def get(k), do: get(k, nil)\n"        /* 2 */
+                               "  defp get(k, d), do: {k, d}\n"         /* 3 */
+                               "  defp get(k, d, _o), do: {k, d}\n"     /* 4 */
+                               "end\n",                                 /* 5 */
+                               CBM_LANG_ELIXIR, "t", "fetcher.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(3, count_defs_named(r, "Function", "get"));
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->label, "Function") != 0 || strcmp(d->name, "get") != 0) {
+            continue;
+        }
+        /* Each keeps its own single line: nothing folded. */
+        ASSERT_EQ((int)d->start_line, (int)d->end_line);
+        ASSERT_EQ(d->param_count == 1, d->is_exported);
+    }
+    ASSERT(has_def_qn(r, "t.fetcher.Fetcher.get#1"));
+    ASSERT(has_def_qn(r, "t.fetcher.Fetcher.get#2"));
+    ASSERT(has_def_qn(r, "t.fetcher.Fetcher.get#3"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A nested module used to be the one place the "def of another name ends the
+ * group" rule was not enough, because the QN carried no module. It carries one
+ * now, so `Outer.run` and `Outer.Inner.run` are different keys and would not
+ * fold on that ground alone -- this pins that they do not. */
 TEST(extract_elixir_nested_module_clauses_do_not_fold) {
     CBMFileResult *r = extract("defmodule Outer do\n"          /* 1 */
                                "  defmodule Inner do\n"        /* 2 */
@@ -1670,6 +1707,8 @@ TEST(extract_elixir_nested_module_clauses_do_not_fold) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_EQ(2, count_defs_named(r, "Function", "run"));
+    ASSERT(has_def_qn(r, "t.nested.Outer.Inner.run#1"));
+    ASSERT(has_def_qn(r, "t.nested.Outer.run#1"));
 
     const CBMDefinition *runs[2] = {NULL, NULL};
     int seen = 0;
@@ -2034,6 +2073,135 @@ TEST(elixir_call_string_argument) {
         seen = 1;
         ASSERT_NOT_NULL(r->calls.items[i].first_string_arg);
         ASSERT_STR_EQ("/wallets", r->calls.items[i].first_string_arg);
+    }
+    ASSERT_EQ(1, seen);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Node identity for Elixir used to be (file path, bare name): no container
+ * segment and no arity, so fetch/1, fetch/2 and fetch/3 in one module were ONE
+ * node holding whichever head sorted last, and three `def message/1` across
+ * three exception modules in one file were one node too. The three existing
+ * Elixir cases above all assert through has_def(), which compares def->name
+ * only, so they would pass unchanged across a complete QN rewrite -- these
+ * assert the QN itself. */
+TEST(elixir_def_qn_carries_module_and_arity) {
+    CBMFileResult *r = extract("defmodule Fx.Store do\n"
+                               "  def fetch(a), do: a\n"
+                               "  def fetch(a, b), do: {a, b}\n"
+                               "  def fetch(a, b, c), do: {a, b, c}\n"
+                               "  def bare, do: :ok\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/store.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.lib.store.Fx.Store.fetch#1"));
+    ASSERT(has_def_qn(r, "t.lib.store.Fx.Store.fetch#2"));
+    ASSERT(has_def_qn(r, "t.lib.store.Fx.Store.fetch#3"));
+    /* A bare `def name, do:` head takes no arguments. */
+    ASSERT(has_def_qn(r, "t.lib.store.Fx.Store.bare#0"));
+    ASSERT_EQ(3, count_defs_named(r, "Function", "fetch"));
+    /* The name column stays the bare symbol: it is what search_graph's
+     * name_pattern matches and what agents are told to pass. */
+    ASSERT(has_def(r, "Function", "fetch"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(elixir_same_named_defs_in_sibling_modules_are_distinct) {
+    CBMFileResult *r = extract("defmodule Fx.ErrA do\n"
+                               "  def message(e), do: e\n"
+                               "end\n"
+                               "\n"
+                               "defmodule Fx.ErrB do\n"
+                               "  def message(e), do: e\n"
+                               "end\n"
+                               "\n"
+                               "defmodule Fx.ErrC do\n"
+                               "  def message(e), do: e\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/errors.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.lib.errors.Fx.ErrA.message#1"));
+    ASSERT(has_def_qn(r, "t.lib.errors.Fx.ErrB.message#1"));
+    ASSERT(has_def_qn(r, "t.lib.errors.Fx.ErrC.message#1"));
+    ASSERT_EQ(3, count_defs_named(r, "Function", "message"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A def carries its module as parent_class, which is what earns the
+ * Class -> Function containment edge in the definitions pass. Without it
+ * module membership existed only as a QN prefix and no edge expressed it. */
+TEST(elixir_def_records_parent_module) {
+    CBMFileResult *r = extract("defmodule Fx.Store do\n"
+                               "  def fetch(a), do: a\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/store.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int seen = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Function") != 0) {
+            continue;
+        }
+        seen = 1;
+        ASSERT_NOT_NULL(r->defs.items[i].parent_class);
+        ASSERT_STR_EQ("t.lib.store.Fx.Store", r->defs.items[i].parent_class);
+        ASSERT_EQ(1, r->defs.items[i].param_count);
+    }
+    ASSERT_EQ(1, seen);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Several clauses of ONE function are one definition, not one per clause.
+ * The (container, name, arity) key keeps that collapse and only fixes the
+ * key -- un-collapsing clauses would be a different defect. */
+TEST(elixir_multi_clause_function_stays_one_identity) {
+    CBMFileResult *r = extract("defmodule Fx.Norm do\n"
+                               "  def norm(nil), do: nil\n"
+                               "  def norm(x) when is_binary(x), do: x\n"
+                               "  def norm(x), do: to_string(x)\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/norm.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, "Function") == 0) {
+            ASSERT_STR_EQ("t.lib.norm.Fx.Norm.norm#1", r->defs.items[i].qualified_name);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The def side and the call-scope side are separate code paths that must emit
+ * a byte-identical string: a call is joined to its source node by exact QN and
+ * falls back to the FILE node on a miss, so a one-segment disagreement
+ * silently reattributes every edge sourced inside an Elixir function. They had
+ * already drifted once -- only the def side unwrapped the `when` guard. */
+TEST(elixir_call_scope_qn_matches_def_qn) {
+    CBMFileResult *r = extract("defmodule Fx.Store do\n"
+                               "  def helper(x), do: x\n"
+                               "  def guarded(x) when is_binary(x) do\n"
+                               "    helper(x)\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/store.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.lib.store.Fx.Store.guarded#1"));
+    int seen = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (strcmp(r->calls.items[i].callee_name, "helper") != 0) {
+            continue;
+        }
+        seen = 1;
+        ASSERT_NOT_NULL(r->calls.items[i].enclosing_func_qn);
+        ASSERT_STR_EQ("t.lib.store.Fx.Store.guarded#1", r->calls.items[i].enclosing_func_qn);
     }
     ASSERT_EQ(1, seen);
     cbm_free_result(r);
@@ -9157,12 +9325,18 @@ SUITE(extraction) {
     RUN_TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it);
     RUN_TEST(extract_elixir_guarded_def_head);
     RUN_TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module);
+    RUN_TEST(extract_elixir_clauses_of_different_arity_do_not_fold);
     RUN_TEST(extract_elixir_nested_module_clauses_do_not_fold);
     RUN_TEST(extract_elixir_folded_clause_is_exported_is_the_or);
     RUN_TEST(extract_elixir_guarded_clause_head_is_not_a_self_call);
     RUN_TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind);
     RUN_TEST(extract_elixir_real_recursion_survives_head_suppression);
     RUN_TEST(extract_elixir_typespec_attribute_is_not_code);
+    RUN_TEST(elixir_def_qn_carries_module_and_arity);
+    RUN_TEST(elixir_same_named_defs_in_sibling_modules_are_distinct);
+    RUN_TEST(elixir_def_records_parent_module);
+    RUN_TEST(elixir_multi_clause_function_stays_one_identity);
+    RUN_TEST(elixir_call_scope_qn_matches_def_qn);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(extract_elixir_guarded_def_head_scope);
     RUN_TEST(extract_elixir_guarded_def_head_guard_usages);

@@ -5399,101 +5399,84 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
 // --- Elixir def/defp/defmodule ---
 
-// Get the "arguments" node for an Elixir call, with fallback to second child.
-static TSNode elixir_call_args(TSNode node) {
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > SECOND_CHILD_IDX) {
-        args = ts_node_child(node, SECOND_CHILD_IDX);
-    }
-    return args;
-}
-
 // Fold one more clause of an Elixir function into the def already pushed for
-// the previous clause. Every clause is its own `def` call, and an Elixir QN
-// carries neither module nor arity, so all of them compute one qualified name
-// and collide on a single graph node. cbm_gbuf_upsert_node breaks a same-QN
-// collision by keeping the LARGEST start_line, so the survivor was the last
-// clause in the file and get_code_snippet returned that clause as the whole
-// function: `def admin?(%__MODULE__{role: :admin}), do: true` /
+// the previous clause. Every clause is its own `def` call, so a two-clause
+// function pushes two definitions that carry the SAME (module, name, arity) QN
+// -- which is right, they are one function -- and collide on one graph node.
+// cbm_gbuf_upsert_node breaks a same-QN collision by keeping the LARGEST
+// start_line, so the survivor was the last clause in the file and
+// get_code_snippet returned that clause as the whole function:
+// `def admin?(%__MODULE__{role: :admin}), do: true` /
 // `def admin?(%__MODULE__{}), do: false` read back as a predicate that always
 // returns false. One node per function is right, so widen its span instead.
 //
+// The QN is the fold key, so what folds is decided by cbm_elixir_def_qn: same
+// container module, same name, same arity. Two arities of one name are two
+// functions and do not fold, and neither do same-named functions in sibling
+// modules or in a nested module.
+//
 // Two bounds keep the widened span honest, and a clause folds only if it clears
 // both:
-//   - Same module body. `scope` is the do_block the previous clause was written
-//     in, so a nested `defmodule` cannot merge with its parent: the QN carries
-//     no module, so `Outer.run` and `Outer.Inner.run` compute the same name and
-//     are array-adjacent when Inner is declared just above Outer's own clause.
+//   - Same body block. `scope` is the block the previous clause was written in,
+//     so a def extracted from a different block cannot merge with a module-body
+//     clause of the same name and arity even when both compute the same QN
+//     under the same module and the two are array-adjacent.
 //   - Same group. Only the immediately preceding EXTRACTED definition is a
-//     candidate, so a def of another name between two same-named defs ends the
-//     group. That is a bound this code imposes, not a guarantee Elixir gives:
-//     the compiler only WARNS ("clauses with the same name and arity should be
-//     grouped together"), it warns per name AND arity while this QN is
-//     arity-free, and non-contiguous clauses do compile. Split clauses
-//     therefore keep separate nodes, which is the pre-existing behaviour.
+//     candidate, so a def of another name or arity between two same-named defs
+//     ends the group. That is a bound this code imposes, not a guarantee Elixir
+//     gives: the compiler only WARNS ("clauses with the same name and arity
+//     should be grouped together") and non-contiguous clauses do compile. Split
+//     clauses therefore keep separate nodes, which is the pre-existing
+//     behaviour.
 //     What the group bound does NOT exclude is a non-definition construct
-//     between two clauses: `@doc` / `@spec` are unary_operators, `use` /
-//     `alias` / `describe` are ordinary calls, and a `defimpl` block's inner
-//     defs are not extracted -- none of them push a def, so anything of that
-//     kind written between two clauses of one function ends up inside the
-//     widened span, and that is not rare. Measured by indexing one 970-file
-//     Elixir lib tree with the binary built from e783f73d and with this one
-//     and diffing the `nodes` rows out of the two SQLite stores: 4,342
-//     Function nodes widen their span, none is added and none is lost, and
-//     131 of the 4,342 now cover a module-body line that is not part of a
-//     clause. Counting each node once per kind, 69 cover a typespec attribute
-//     (@spec/@type/@typep/@opaque/@callback/@macrocallback), 53 an @doc or
-//     @typedoc, 15 an @impl, 59 a bare comment line, and 4 a `use`, `alias`,
-//     `import`, `require` or a module-level `quote`. Swallowed typespecs are
-//     the largest attribute kind, not an absent one.
+//     between two clauses: `@doc` / `@spec` are unary_operators and never reach
+//     the def walk at all, and `use` / `alias` / `describe` are calls that push
+//     no def -- so anything of that kind written between two clauses of one
+//     function ends up inside the widened span. Measured by
+//     indexing forge-symphony-graph/lib (970 .ex files) with this binary and
+//     with the same tree minus this fold, and diffing the `nodes` rows out of
+//     the two SQLite stores: 6,611 Function nodes fold, and 78 of them swallow
+//     a module-body-level construct that is not a def -- 69 a bare comment
+//     line, 5 a module-level `quote`, 4 a typespec attribute, 1 an @doc, 1 an
+//     @impl, and 0 a `use`, `alias`, `import` or `require`.
+//     The (module, name, arity) key is what keeps that number small. An
+//     arity-free key folds `def x/1` across the @spec of the `defp x/2` written
+//     between them: the same measurement against a build whose QN carries
+//     neither module nor arity gives 6,701 folded nodes, 162 of them swallowing
+//     something, and 124 of those a typespec.
 //
-// The widened span also admits a phantom call that a narrower span kept out,
-// which is why the head suppression in extract_calls.c travels with this fold
-// rather than after it. cbm.c flags self-recursion by finding the innermost
-// Function whose [start_line, end_line] contains a recorded call whose short
-// name matches the function's own, so any pre-existing phantom between the
-// first and the last clause becomes a self-edge as soon as the span covers it.
-// That cost is real and is measured rather than asserted away. Same corpus,
-// same method, reading each flagged node's own source span and looking for any
-// non-declaration line that names it as a call, a capture or a pipe target:
-// self_recursive Function nodes go 129 -> 349, and the ones carrying no
-// self-call form go 24 -> 86. The lines responsible are the @spec and @doc
-// heads the widened span now covers, which are read as code by the unified
-// walk -- a separate defect with a separate fix, not something this fold can
-// close. What the fold and the head suppression together remove is 2,303
-// edges, none of them added back: see elixir_call_is_definition_role in
-// extract_calls.c.
-//
-// A clause whose macro differs (`def` foo/1 beside `defp` foo/2) still folds,
-// because the arity-free QN already puts both on one node; is_exported is then
-// the OR over the folded clauses, so a name any clause exports stays exported.
-// That OR changes a recorded flag, which the node diff confirms and which is
-// worth stating rather than leaving to be discovered: on the same corpus
-// exactly 6 Function nodes change is_exported, all false -> true and none the
-// other way. Each is a `def` clause written above a `defp` clause of the same
-// name, where the pre-patch last-clause-wins record reported a publicly
-// callable name as unexported. Verified against the source in every one: the
-// new value is the correct one.
+// A clause whose macro differs (`def` z/1 beside `defp` z/1 -- a private guard
+// clause written above the public head is ordinary Elixir) folds onto one node,
+// so is_exported has to be the OR over the folded clauses: the name is callable
+// from outside if any clause exports it, and a wholly private function stays
+// unexported. That OR changes a recorded flag rather than only a span.
+// On the same corpus that OR currently changes nothing: 0 of the 6,611 folded
+// nodes read a different is_exported than the unfolded build does. The arity
+// fence is why it is quiet -- `def x/1` beside `defp x/2` is two nodes now, so
+// only a def and a defp of the SAME arity reach the OR at all. It is still
+// load-bearing where they do: a last-clause-wins assignment reports a publicly
+// callable name as unexported whenever the def is written above the defp, which
+// is what `defp z(1)` / `def z(2)` pins in the tests.
 // Returns true when the clause folded.
 static bool fold_elixir_clause(CBMExtractCtx *ctx, const char *qn, TSNode scope, TSNode node,
                                uint32_t end_line, bool is_exported) {
     if (!qn || ctx->result->defs.count <= 0 || ts_node_is_null(scope)) {
         return false;
     }
-    TSNode here = ts_node_parent(node);
-    if (ts_node_is_null(here) || !ts_node_eq(here, scope)) {
+    TSNode block = ts_node_parent(node);
+    if (ts_node_is_null(block) || !ts_node_eq(block, scope)) {
         return false;
     }
-    CBMDefinition *prev = &ctx->result->defs.items[ctx->result->defs.count - 1];
+    CBMDefinition *prev = &ctx->result->defs.items[ctx->result->defs.count - CBM_LAST_OFFSET];
     if (!prev->label || strcmp(prev->label, "Function") != 0 || !prev->qualified_name ||
         strcmp(prev->qualified_name, qn) != 0) {
         return false;
     }
     /* Only end_line moves. prev->start_line is already the minimum, so this
      * takes no start_line argument: a clause folds only into the def pushed
-     * for the immediately preceding extracted clause of the same do_block, and
-     * extract_elixir_call pushes a do_block's children onto its stack in
-     * reverse index order so they pop in source order. A `start_line <
+     * for the immediately preceding extracted clause of the same block, and
+     * extract_elixir_call pushes a block's children onto its stack in reverse
+     * index order so they pop in source order. A `start_line <
      * prev->start_line` guard here would be unreachable; if that traversal
      * ever stops being source-ordered, this is the line that has to change
      * with it. */
@@ -5504,44 +5487,25 @@ static bool fold_elixir_clause(CBMExtractCtx *ctx, const char *qn, TSNode scope,
     return true;
 }
 
-// Handle Elixir def/defp/defmacro — extract function definition. `scope` is the
-// module body the previous clause was extracted from, and is updated to this
-// def's own module body; see fold_elixir_clause for what it bounds.
+// Handle Elixir def/defp/defmacro — extract function definition.
+//
+// `module_qn` is the enclosing defmodule's QN, threaded down by the frame stack
+// in extract_elixir_call. It is what gives fetch/1 in Fx.Store and fetch/1 in
+// Fx.Other distinct identities, and what earns the Class -> Function
+// containment edge (register_and_link_def keys on parent_class).
+//
+// `scope` is the body block the previous clause was extracted from, and is
+// updated to this def's own block; see fold_elixir_clause for what it bounds.
 static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro,
-                                    TSNode *scope) {
+                                    const char *module_qn, TSNode *scope) {
     CBMArena *a = ctx->arena;
-    TSNode args = elixir_call_args(node);
-    if (ts_node_is_null(args)) {
+    int arity = 0;
+    const char *name = cbm_elixir_def_head(ctx, node, &arity);
+    if (!name) {
         return;
     }
 
-    TSNode first_arg = ts_node_child(args, 0);
-    if (ts_node_is_null(first_arg)) {
-        return;
-    }
-
-    // `def name(args) when guard` parses the whole head as a `when`
-    // binary_operator, so the name lives on its left operand rather than
-    // directly under the call. Without unwrapping it, every guarded clause is
-    // dropped, and a function whose clauses ALL carry guards never appears in
-    // the graph at all -- silently, since a missing definition is not an error.
-    // The unwrap lives in helpers.c because it peels only `when`: an operator
-    // definition (`def a + b`) is a binary_operator head too, and unwrapping
-    // that one would name the function after its own left parameter.
-    first_arg = cbm_elixir_def_head_unwrap_guard(first_arg);
-
-    const char *fk = ts_node_type(first_arg);
-    char *name = NULL;
-    if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
-        name = cbm_node_text(a, ts_node_child(first_arg, 0), ctx->source);
-    } else if (strcmp(fk, "identifier") == 0) {
-        name = cbm_node_text(a, first_arg, ctx->source);
-    }
-    if (!name || !name[0]) {
-        return;
-    }
-
-    const char *qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    const char *qn = cbm_elixir_def_qn(ctx, module_qn, name, arity);
     uint32_t start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     uint32_t end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     bool is_exported = (strcmp(macro, "def") == 0 || strcmp(macro, "defmacro") == 0);
@@ -5555,6 +5519,8 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     memset(&def, 0, sizeof(def));
     def.name = name;
     def.qualified_name = qn;
+    def.parent_class = module_qn;
+    def.param_count = arity;
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = start_line;
@@ -5563,49 +5529,99 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
-// Emit Class definition for an Elixir defmodule node. Returns do_block or null.
-static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
-    CBMArena *a = ctx->arena;
+/* Emit the Class definition for an Elixir defmodule. Writes the module's QN to
+ * *out_module_qn (nested under `enclosing_qn` by compute_class_qn's rule, so
+ * `defmodule Inner` inside `defmodule Outer` is Outer.Inner) and returns the
+ * do_block, or a null node when the head is not a usable defmodule. */
+static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur, const char *enclosing_qn,
+                                       const char **out_module_qn) {
     TSNode null_node = {0};
-    TSNode args = elixir_call_args(cur);
-    if (ts_node_is_null(args)) {
+    const char *name = cbm_elixir_module_head(ctx, cur);
+    if (!name) {
         return null_node;
     }
-    TSNode name_node = ts_node_child(args, 0);
-    if (ts_node_is_null(name_node)) {
-        return null_node;
-    }
-    char *name = cbm_node_text(a, name_node, ctx->source);
-    if (!name || !name[0]) {
+    char *module_qn = cbm_elixir_def_qn(ctx, enclosing_qn, name, CBM_ARITY_NONE);
+    if (!module_qn) {
         return null_node;
     }
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = module_qn;
+    def.parent_class = enclosing_qn;
     def.label = "Class";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(cur).row + TS_LINE_OFFSET;
     def.is_exported = true;
-    cbm_defs_push(&ctx->result->defs, a, def);
+    cbm_defs_push(&ctx->result->defs, ctx->arena, def);
+    if (out_module_qn) {
+        *out_module_qn = module_qn;
+    }
     return cbm_find_child_by_kind(cur, "do_block");
+}
+
+/* A traversal frame for the Elixir walk: the node plus the defmodule QN that
+ * encloses it. Mirrors walk_defs_frame_t — the generic walk carries
+ * enclosing_class_qn the same way, and Elixir needs it for the same reason.
+ * Frames come from ctx->scratch, which the enclosing extract call owns. */
+typedef struct {
+    TSNode node;
+    const char *module_qn;
+} elixir_frame_t;
+
+typedef struct {
+    elixir_frame_t *items;
+    int count;
+    int cap;
+    CBMArena *scratch;
+} elixir_stack_t;
+
+/* Capacity multiplier when the frame stack is full. */
+enum { ELIXIR_STACK_GROWTH = 2 };
+
+static void elixir_stack_init(elixir_stack_t *s, const CBMExtractCtx *ctx, int initial_cap) {
+    CBMArena *arena = ctx->scratch ? ctx->scratch : ctx->arena;
+    s->scratch = arena;
+    s->items = (elixir_frame_t *)cbm_arena_alloc(arena, (size_t)initial_cap * sizeof(*s->items));
+    s->count = 0;
+    s->cap = s->items ? initial_cap : 0;
+}
+
+static void elixir_stack_push(elixir_stack_t *s, TSNode node, const char *module_qn) {
+    if (s->count >= s->cap) {
+        int new_cap = s->cap ? s->cap * ELIXIR_STACK_GROWTH : CBM_SZ_64;
+        elixir_frame_t *grown =
+            (elixir_frame_t *)cbm_arena_alloc(s->scratch, (size_t)new_cap * sizeof(*grown));
+        if (!grown) {
+            return; /* OOM: best-effort, stop growing */
+        }
+        if (s->items && s->count > 0) {
+            memcpy(grown, s->items, (size_t)s->count * sizeof(*grown));
+        }
+        s->items = grown;
+        s->cap = new_cap;
+    }
+    s->items[s->count].node = node;
+    s->items[s->count].module_qn = module_qn;
+    s->count++;
 }
 
 // Process Elixir call nodes iteratively — handles defmodule/def/defp/defmacro
 // without recursion between extract_elixir_call ↔ extract_elixir_module_def.
 static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     (void)spec;
-    /* Module body the last extracted clause was written in; see
+    /* Body block the last extracted clause was written in; see
      * fold_elixir_clause. Null until the first def, so nothing folds into a
      * def left over from a previous top-level call node. */
     TSNode def_scope = {0};
-    TSNodeStack stack;
-    ts_nstack_init(&stack, ctx, CBM_SZ_64);
-    ts_nstack_push(&stack, node);
+    elixir_stack_t stack;
+    elixir_stack_init(&stack, ctx, CBM_SZ_64);
+    elixir_stack_push(&stack, node, ctx->enclosing_class_qn);
 
     while (stack.count > 0) {
-        TSNode cur = ts_nstack_pop(&stack);
+        elixir_frame_t frame = stack.items[--stack.count];
+        TSNode cur = frame.node;
         CBMArena *a = ctx->arena;
 
         if (ts_node_child_count(cur) == 0) {
@@ -5622,15 +5638,16 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
 
         if (strcmp(macro, "def") == 0 || strcmp(macro, "defp") == 0 ||
             strcmp(macro, "defmacro") == 0) {
-            extract_elixir_func_def(ctx, cur, macro, &def_scope);
+            extract_elixir_func_def(ctx, cur, macro, frame.module_qn, &def_scope);
         } else if (strcmp(macro, "defmodule") == 0) {
-            TSNode do_block = emit_elixir_module_class(ctx, cur);
+            const char *module_qn = NULL;
+            TSNode do_block = emit_elixir_module_class(ctx, cur, frame.module_qn, &module_qn);
             if (!ts_node_is_null(do_block)) {
                 uint32_t dbc = ts_node_child_count(do_block);
                 for (int di = (int)dbc - SKIP_CHAR; di >= 0; di--) {
                     TSNode dchild = ts_node_child(do_block, (uint32_t)di);
                     if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
-                        ts_nstack_push(&stack, dchild);
+                        elixir_stack_push(&stack, dchild, module_qn);
                     }
                 }
             }
