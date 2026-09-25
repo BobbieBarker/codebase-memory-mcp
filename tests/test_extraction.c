@@ -1847,24 +1847,22 @@ static int elixir_any_ref_count(CBMFileResult *r, const char *name) {
 }
 
 /* The head suppression has to REMOVE the phantom, not relabel it. What makes
- * that hold for a def head is not the calls walk alone: is_elixir_def_binding
- * in extract_usages.c already treats everything inside a def's first argument
- * as a binding occurrence rather than a reference, so the identifier
- * handle_calls declines is declined by handle_usages too. That agreement is the
- * invariant under test, and it is why the counts below are over every extractor
- * rather than over r->calls.
+ * that hold for a def head is not the calls walk alone: is_elixir_def_binding in
+ * extract_usages.c already treats everything inside a def's first argument as
+ * a binding occurrence rather than a reference, so the identifier handle_calls
+ * declines is declined by handle_usages too. That agreement is the invariant
+ * under test, and it is why the counts below are over every extractor rather
+ * than over r->calls.
  *
- * `spec_subject` pins the boundary of this patch, and pins it as a RELATION
- * rather than a count, because the count cannot see the defect. A typespec
- * subject is the same shape as a def head and is NOT suppressed here: nothing
- * in extract_usages.c treats it as a binding, so declining it in handle_calls
- * only relabels its phantom as a USAGE. At extraction that relabel is
- * invisible -- one reference before, one after -- and it becomes a defect
- * downstream, where CALLS and USAGE are separate rows under
- * UNIQUE(source,target,type) and the relabelled phantom stops colliding with
- * the real call it used to hide behind. So the assertion is that every
- * reference recorded for a typespec subject is a CALL and none has become a
- * usage, a read/write or a type reference. */
+ * `spec_subject` pins the boundary between the two mechanisms. A typespec
+ * subject is the same shape as a def head, and suppressing it in the calls walk
+ * would only relabel its phantom as a USAGE, because nothing treats it as a
+ * binding. It is removed instead by skipping the whole `@spec` subtree before
+ * any extractor sees it (is_elixir_typespec_attribute, extract_unified.c), so
+ * the assertion is both that no reference of any kind survives AND that what
+ * does survive is never a relabelling: the equality holds at 0 == 0 here, and
+ * would hold at 1 == 1 on a build with the subtree skip removed but the calls
+ * suppression left in place. */
 TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind) {
     CBMFileResult *r = extract("defmodule Heads do\n"                              /* 1 */
                                "  def guarded(x) when is_integer(x), do: x\n"      /* 2 */
@@ -1886,11 +1884,19 @@ TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind) {
     /* The guard predicate is a real call and survives as one. */
     ASSERT_EQ(1, count_calls_named(r, "is_integer"));
     ASSERT_EQ(1, elixir_any_ref_count(r, "is_integer"));
-    /* Declared, not suppressed here; see the comment above. Every reference
-     * this file records for a typespec subject is a CALL -- none of them has
-     * been relabelled into a usage, a read/write or a type reference. */
+    /* Neither the @spec line nor the def head it precedes leaves a reference,
+     * and nothing has been relabelled into a usage, a read/write or a type
+     * reference. */
+    ASSERT_EQ(0, count_calls_named(r, "spec_subject"));
     ASSERT_EQ(count_calls_named(r, "spec_subject"),
               elixir_any_ref_count(r, "spec_subject"));
+
+    ASSERT_EQ(1, count_defs_named(r, "Function", "guarded"));
+    const CBMDefinition *guarded = elixir_first_def(r, "guarded");
+    ASSERT_NOT_NULL(guarded);
+    ASSERT_EQ(2, (int)guarded->start_line);
+    ASSERT_EQ(3, (int)guarded->end_line);
+    ASSERT_FALSE(guarded->is_recursive);
     cbm_free_result(r);
     PASS();
 }
@@ -1915,6 +1921,94 @@ TEST(extract_elixir_real_recursion_survives_head_suppression) {
     ASSERT_EQ(2, (int)walk->start_line);
     ASSERT_EQ(3, (int)walk->end_line);
     ASSERT_TRUE(walk->is_recursive);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* An Elixir module attribute parses as `unary_operator(@, call(<attr>, args))`,
+ * so a typespec line reaches the unified walk as ordinary code and every symbol
+ * it names collects a phantom inbound edge from the enclosing Module -- a CALLS
+ * onto the specified function, and for `@type` a USAGE plus a WRITES asserting
+ * a mutation that does not exist. On a codebase whose convention is @spec on
+ * every public function, fan_in then never reaches 0 and "which exported
+ * functions nothing calls" is unanswerable.
+ *
+ * All six heads in the skip list are exercised, so deleting any one entry from
+ * typespec_heads[] breaks this test.
+ *
+ * Two of the groups below pin a decision rather than a repair, and both are
+ * argued in is_elixir_typespec_attribute's comment:
+ *
+ *   type_refs[] -- a typespec's type references are not indexed at all. A type
+ *   declaration mints no node, so such a reference resolves onto nothing or
+ *   onto a same-named FUNCTION, which is the pollution rather than a record of
+ *   it. Restoring any of them must break this test.
+ *
+ *   behaviour_contract_names[] -- accepted cost. A @callback / @macrocallback
+ *   name is a function name, so before this change it resolved cross-file onto
+ *   the functions implementing the behaviour. Nothing replaces that edge.
+ *
+ * The attribute NAME phantom outside the typespec family is deliberately still
+ * there: `@timeout` keeps its one reference, and its VALUE is ordinary
+ * compile-time code that still runs. `guarded` is pinned at 0 rather than 1
+ * because the guarded def head no longer mints a phantom either -- the calls
+ * walk now recognises a `when`-wrapped head as a declaration. */
+TEST(extract_elixir_typespec_attribute_is_not_code) {
+    /* Names a typespec declares, plus the six attribute heads themselves.
+     * Every one carries a reference on the pristine build. */
+    static const char *const declared[] = {"with_spec", "entry",  "secret",  "handle",
+                                           "spec",      "type",   "typep",   "opaque",
+                                           "callback",  "macrocallback", NULL};
+    /* Accepted cost: these used to resolve onto the behaviour's implementors. */
+    static const char *const behaviour_contract_names[] = {"handle_it", "expand_it", NULL};
+    /* Pinned decision: type references are not indexed -- remote, bare-local
+     * and builtin alike. */
+    static const char *const type_refs[] = {"MyApp.User.t", "String.t", "MyApp.Vault.key",
+                                            "Macro.t",      "t",        "key",
+                                            "term",         "integer",  "reference",
+                                            "atom",         NULL};
+    CBMFileResult *r = extract("defmodule Specced do\n"
+                               "  @timeout Application.compile_env(:app, :timeout)\n"
+                               "  @type entry :: String.t()\n"
+                               "  @typep secret :: MyApp.Vault.key()\n"
+                               "  @opaque handle :: reference()\n"
+                               "  @callback handle_it(term) :: :ok\n"
+                               "  @macrocallback expand_it(term) :: Macro.t()\n"
+                               "  @spec with_spec(MyApp.User.t()) :: integer\n"
+                               "  def with_spec(n), do: n\n"
+                               "  def without_spec(n), do: n\n"
+                               "  @spec guarded(atom) :: :ok\n"
+                               "  def guarded(x) when is_atom(x), do: :ok\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "specced.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* The definitions themselves are a separate pass and are unaffected. */
+    ASSERT(has_def(r, "Function", "with_spec"));
+    ASSERT(has_def(r, "Function", "without_spec"));
+    ASSERT(has_def(r, "Function", "guarded"));
+    /* Control on the instrument, not a pin: `without_spec` carries no typespec
+     * and is never called, so it reads 0 on the pristine build too. It is here
+     * to show elixir_any_ref_count does not score a definition as a reference,
+     * which is what would make every 0 below vacuous. It cannot fail first and
+     * cannot catch a regression. */
+    ASSERT_EQ(0, elixir_any_ref_count(r, "without_spec"));
+    for (const char *const *name = declared; *name; name++) {
+        ASSERT_EQ(0, elixir_any_ref_count(r, *name));
+    }
+    for (const char *const *name = behaviour_contract_names; *name; name++) {
+        ASSERT_EQ(0, elixir_any_ref_count(r, *name));
+    }
+    for (const char *const *name = type_refs; *name; name++) {
+        ASSERT_EQ(0, elixir_any_ref_count(r, *name));
+    }
+    /* A non-typespec attribute is untouched: its value really is compile-time
+     * code, and its name still mints the one phantom this fix does not close. */
+    ASSERT_EQ(1, count_calls_named(r, "Application.compile_env"));
+    ASSERT_EQ(1, elixir_any_ref_count(r, "timeout"));
+    /* Both phantoms onto `guarded` are gone: the @spec one to the subtree skip,
+     * the def-head one to the calls walk recognising a guarded head. */
+    ASSERT_EQ(0, elixir_any_ref_count(r, "guarded"));
     cbm_free_result(r);
     PASS();
 }
@@ -9068,6 +9162,7 @@ SUITE(extraction) {
     RUN_TEST(extract_elixir_guarded_clause_head_is_not_a_self_call);
     RUN_TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind);
     RUN_TEST(extract_elixir_real_recursion_survives_head_suppression);
+    RUN_TEST(extract_elixir_typespec_attribute_is_not_code);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(extract_elixir_guarded_def_head_scope);
     RUN_TEST(extract_elixir_guarded_def_head_guard_usages);
