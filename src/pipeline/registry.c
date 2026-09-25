@@ -858,9 +858,38 @@ void cbm_registry_free(cbm_registry_t *r) {
 
 /* ── Registration ────────────────────────────────────────────────── */
 
+/* Record `owned_qn` in the by-name bucket for `key`, keeping the bucket's
+ * is_test flags in step with its entries.
+ *
+ * No array dedup needed: cbm_registry_add's exact-map check guarantees the QN
+ * is new, and it calls this at most once per distinct key. */
+static void index_under_name(cbm_registry_t *r, const char *key, const char *owned_qn) {
+    qn_array_t *arr = cbm_ht_get(r->by_name, key);
+    if (!arr) {
+        arr = calloc(CBM_ALLOC_ONE, sizeof(qn_array_t));
+        cbm_ht_set(r->by_name, strdup(key), arr);
+    }
+    int before = arr->count;
+    cbm_da_push(arr, (char *)owned_qn);
+    if (arr->count == before) {
+        return; /* the name could not be recorded: no verdict to cache */
+    }
+    if (arr->count > arr->is_test_cap) {
+        int want = arr->cap > 0 ? arr->cap : arr->count;
+        uint8_t *grown =
+            cbm_realloc(CBM_MEM_CLASS_DYN_ARRAY, arr->is_test, (size_t)want * sizeof(uint8_t));
+        if (grown) {
+            arr->is_test = grown;
+            arr->is_test_cap = want;
+        }
+    }
+    if (arr->count <= arr->is_test_cap) {
+        arr->is_test[arr->count - SKIP_ONE] = is_test_qn(owned_qn) ? 1 : 0;
+    }
+}
+
 void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified_name,
                       const char *label) {
-    (void)name;
     if (!r || !qualified_name || !label) {
         return;
     }
@@ -893,30 +922,27 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     cbm_ht_set(r->exact, strdup(qualified_name), (void *)interned);
     const char *owned_qn = cbm_ht_get_key(r->exact, qualified_name);
 
-    /* Index by simple name.
-     * No array dedup needed: exact-map check above guarantees uniqueness. */
-    const char *simple = simple_name(qualified_name);
-    qn_array_t *arr = cbm_ht_get(r->by_name, simple);
-    if (!arr) {
-        arr = calloc(CBM_ALLOC_ONE, sizeof(qn_array_t));
-        cbm_ht_set(r->by_name, strdup(simple), arr);
-    }
-    int before = arr->count;
-    cbm_da_push(arr, (char *)owned_qn);
-    if (arr->count == before) {
-        return; /* the name could not be recorded: no verdict to cache */
-    }
-    if (arr->count > arr->is_test_cap) {
-        int want = arr->cap > 0 ? arr->cap : arr->count;
-        uint8_t *grown =
-            cbm_realloc(CBM_MEM_CLASS_DYN_ARRAY, arr->is_test, (size_t)want * sizeof(uint8_t));
-        if (grown) {
-            arr->is_test = grown;
-            arr->is_test_cap = want;
-        }
-    }
-    if (arr->count <= arr->is_test_cap) {
-        arr->is_test[arr->count - SKIP_ONE] = is_test_qn(owned_qn) ? 1 : 0;
+    /* Index the symbol under the name its caller passed AND under the QN's
+     * last dot segment, whenever the two differ.
+     *
+     * Neither key alone covers every language, because the two disagree in
+     * both directions. A QN can carry a discriminator the name does not: a
+     * Rust cfg twin is minted as "add#cfg(test)" (rust_cfg_qualified_name)
+     * and simple_name() has no '#' handling, so the derived key alone filed
+     * that function under the literal string "add#cfg(test)", where no bare
+     * `add` callee could reach it. A name can equally carry dots the QN's
+     * tail drops: an HCL block names itself "resource.aws_instance.web"
+     * (find_hcl_block_name) and a TOML dotted table key names itself
+     * "tool.poetry.dependencies", so the passed key alone loses the tail
+     * lookup that an `aws_instance.web.id` reference resolves through.
+     *
+     * `name` is NULL or empty only for callers that have no symbol name to
+     * give; those have the derived key and nothing else. */
+    const char *derived = simple_name(qualified_name);
+    const char *given = (name && name[0]) ? name : derived;
+    index_under_name(r, given, owned_qn);
+    if (strcmp(given, derived) != 0) {
+        index_under_name(r, derived, owned_qn);
     }
 }
 
