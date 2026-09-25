@@ -15141,7 +15141,9 @@ TEST(pipeline_objectscript_export_range_join_keeps_one_trailing_marker) {
  * Everything below is a measured defect the graph used to carry:
  *   - fetch/1, fetch/2 and fetch/3 in one module collapsed to ONE node;
  *   - three `def message/1` in three modules in one file collapsed to one;
- *   - no Class -> Function containment edge existed at all. */
+ *   - no Class -> Function containment edge existed at all;
+ *   - `Keyword.get(opts, :reason)` bound to an unrelated local get/1;
+ *   - a fully qualified cross-module call produced no CALLS edge. */
 TEST(pipeline_elixir_container_and_arity_identity) {
     char *repo = th_mktempdir("cbm_elixir_identity");
     ASSERT_NOT_NULL(repo);
@@ -15201,6 +15203,10 @@ TEST(pipeline_elixir_container_and_arity_identity) {
     /* Module membership is an edge, not just a QN prefix. */
     ASSERT_TRUE(cross_file_edge_exists(st, project, "Fx.Store", "fetch", "DEFINES_METHOD"));
     ASSERT_TRUE(cross_file_edge_exists(st, project, "Fx.ErrB", "message", "DEFINES_METHOD"));
+
+    /* The qualified cross-module call resolves; the intra-module one does too. */
+    ASSERT_TRUE(cross_file_edge_exists(st, project, "run", "get", "CALLS"));
+    ASSERT_TRUE(cross_file_edge_exists(st, project, "run", "fetch", "CALLS"));
 
     cbm_store_close(st);
     cbm_pipeline_free(p);

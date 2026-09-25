@@ -96,6 +96,12 @@ struct cbm_registry {
 
     /* byName: simpleName → qn_array_t* (heap-owned) */
     CBMHashTable *by_name;
+
+    /* True once any registered QN carries an arity fence. Every fence-aware
+     * probe below is skipped while this is false, so a corpus with no
+     * overload-by-arity language pays nothing for the mechanism -- neither the
+     * extra bucket scan on the hot same-module path nor the wider cache key. */
+    bool has_arity_fence;
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
@@ -922,6 +928,10 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     cbm_ht_set(r->exact, strdup(qualified_name), (void *)interned);
     const char *owned_qn = cbm_ht_get_key(r->exact, qualified_name);
 
+    if (!r->has_arity_fence && cbm_qn_fence_arity(owned_qn) >= 0) {
+        r->has_arity_fence = true;
+    }
+
     /* Index the symbol under the QN's last dot segment, and additionally under
      * the name its caller passed when that segment carries a '#' fence.
      *
@@ -1078,20 +1088,115 @@ static cbm_resolution_t resolve_import_map(const cbm_registry_t *r, const char *
     return empty_result();
 }
 
-/* Strategy 2: Same-module match */
-static cbm_resolution_t resolve_same_module(const cbm_registry_t *r, const char *callee_name,
-                                            const char *suffix, const char *module_qn) {
+static bool receiver_chain_admits(const char *callee_name, const char *candidate_qn);
+
+/* True when `qn` is `stem` followed by nothing but an arity fence. */
+static bool qn_is_fenced_form_of(const char *qn, const char *stem, size_t stem_len) {
+    if (strncmp(qn, stem, stem_len) != 0 || qn[stem_len] != '#') {
+        return false;
+    }
+    return cbm_qn_fence_arity(qn) >= 0;
+}
+
+/* One same-module probe: does `base`.`tail` name a registered symbol?
+ *
+ * An arity-fenced definition is stored as "base.tail#N", so the plain exact
+ * lookup misses it and the call would fall through to the bare-name scorer at
+ * roughly half the confidence -- a silent degradation, since the scorer often
+ * still lands on a right-looking answer. The fenced forms of the same stem are
+ * therefore searched too: `arity` picks among them when the call site knows
+ * how many arguments it wrote, and a single fenced form wins unaided. */
+static cbm_resolution_t same_module_probe(const cbm_registry_t *r, const char *base,
+                                          const char *tail, int arity) {
     char candidate[CBM_SZ_512];
-    snprintf(candidate, sizeof(candidate), "%s.%s", module_qn, callee_name);
+    int written = snprintf(candidate, sizeof(candidate), "%s.%s", base, tail);
+    if (written < 0 || (size_t)written >= sizeof(candidate)) {
+        return empty_result();
+    }
     const char *stored_key = cbm_ht_get_key(r->exact, candidate);
     if (stored_key) {
         return (cbm_resolution_t){stored_key, "same_module", CONF_SAME_MODULE, REG_RESOLVED};
     }
+    if (!r->has_arity_fence) {
+        return empty_result(); /* nothing in this graph can carry a fence */
+    }
+    if (arity >= 0) {
+        char fenced[CBM_SZ_512];
+        int fw = snprintf(fenced, sizeof(fenced), "%s#%d", candidate, arity);
+        if (fw >= 0 && (size_t)fw < sizeof(fenced)) {
+            stored_key = cbm_ht_get_key(r->exact, fenced);
+            if (stored_key) {
+                return (cbm_resolution_t){stored_key, "same_module", CONF_SAME_MODULE,
+                                          REG_RESOLVED};
+            }
+        }
+    }
+    /* No arity hint, or none of that arity: accept a SOLE fenced form. */
+    qn_array_t *arr = cbm_ht_get(r->by_name, simple_name(tail));
+    if (!arr) {
+        return empty_result();
+    }
+    const char *match = NULL;
+    for (int i = 0; i < arr->count; i++) {
+        if (!qn_is_fenced_form_of(arr->items[i], candidate, (size_t)written)) {
+            continue;
+        }
+        if (match) {
+            return empty_result(); /* several arities and no hint to choose */
+        }
+        match = arr->items[i];
+    }
+    if (match) {
+        return (cbm_resolution_t){match, "same_module", CONF_SAME_MODULE, REG_RESOLVED};
+    }
+    return empty_result();
+}
+
+/* Strategy 2: Same-module match.
+ *
+ * `module_qn` is the FILE's QN, which is the container only for languages whose
+ * container IS the path. Where a language names its container in the source
+ * (an Elixir defmodule), the def QN carries that extra segment and a file-QN
+ * probe can never match it, so an intra-module call would fall through to the
+ * bare-name scorer at a LOWER confidence -- a silent degradation a green test
+ * cannot see. `container_qn` is the caller's own container, recovered from its
+ * enclosing_func_qn, and is tried first. It is NULL for every caller that has
+ * none, leaving the file-QN behaviour exactly as it was. */
+static cbm_resolution_t resolve_same_module(const cbm_registry_t *r, const char *callee_name,
+                                            const char *suffix, const char *module_qn,
+                                            const char *container_qn, int arity) {
+    cbm_resolution_t res;
+    if (container_qn && container_qn[0]) {
+        res = same_module_probe(r, container_qn, callee_name, arity);
+        if (res.qualified_name) {
+            return res;
+        }
+    }
+    res = same_module_probe(r, module_qn, callee_name, arity);
+    if (res.qualified_name) {
+        return res;
+    }
     if (suffix && suffix[0]) {
-        snprintf(candidate, sizeof(candidate), "%s.%s", module_qn, suffix);
-        stored_key = cbm_ht_get_key(r->exact, candidate);
-        if (stored_key) {
-            return (cbm_resolution_t){stored_key, "same_module", CONF_SAME_MODULE, REG_RESOLVED};
+        /* Suffix fallback: the callee's qualifier is DISCARDED here, so a
+         * qualified `Other.run` can bind to this module's own run.
+         *
+         * The receiver-chain rule is applied to the CONTAINER probe only.
+         * container_qn is non-NULL only where cbm_lang_container_is_source_named
+         * holds, so the guard reaches one language, which is the per-language
+         * contract this resolver is held to. The file-QN probe below is left
+         * exactly as it was on main: extending the rule to it is a precision win
+         * for every grammar, and I still think it is the right end state, but it
+         * is not a change a 10-language corpus can license and it belongs in its
+         * own commit with its own evidence. */
+        if (container_qn && container_qn[0]) {
+            res = same_module_probe(r, container_qn, suffix, arity);
+            if (res.qualified_name && receiver_chain_admits(callee_name, res.qualified_name)) {
+                return res;
+            }
+        }
+        res = same_module_probe(r, module_qn, suffix, arity);
+        if (res.qualified_name) {
+            return res;
         }
     }
     return empty_result();
@@ -1140,6 +1245,23 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
  * as trustworthy as a same-module hit. */
 #define CONF_QUALIFIED_SUFFIX 0.90
 
+/* Copy `callee_name` into `out` with every "::" scope separator rewritten as
+ * ".", so the result composes with dotted candidate QNs. Returns the written
+ * length. */
+static size_t dotted_callee(char *out, size_t cap, const char *callee_name) {
+    size_t w = 0;
+    for (const char *s = callee_name; *s && w + SKIP_ONE < cap;) {
+        if (s[0] == ':' && s[SKIP_ONE] == ':') {
+            out[w++] = '.';
+            s += PAIR_LEN;
+        } else {
+            out[w++] = *s++;
+        }
+    }
+    out[w] = '\0';
+    return w;
+}
+
 /* When a callee is package/namespace-qualified (Foo::Bar::sub or Foo.Bar.sub),
  * disambiguate among same-simple-name candidates by matching the FULL qualified
  * tail against each candidate QN at a segment boundary. Returns the sole
@@ -1151,45 +1273,66 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
  * both reduce to "run", so the bare-name scorer would route every caller to a
  * single winner. Language agnostic: callees with no separator return NULL and
  * leave behavior unchanged. */
-static const char *qualified_suffix_match(const qn_array_t *arr, const char *callee_name) {
-    /* Normalize "::" → "." so the tail composes with dotted candidate QNs. */
+static const char *qualified_suffix_match(const cbm_registry_t *r, const qn_array_t *arr,
+                                          const char *callee_name, int arity) {
     char dotted[CBM_SZ_512];
-    size_t w = 0;
-    for (const char *s = callee_name; *s && w + SKIP_ONE < sizeof(dotted);) {
-        if (s[0] == ':' && s[1] == ':') {
-            dotted[w++] = '.';
-            s += 2;
-        } else {
-            dotted[w++] = *s++;
-        }
-    }
-    dotted[w] = '\0';
+    size_t w = dotted_callee(dotted, sizeof(dotted), callee_name);
     /* Must be qualified (contain a '.') — a bare name matches every candidate
      * and carries no disambiguating signal. */
     if (!strchr(dotted, '.')) {
         return NULL;
     }
+    /* Two tallies: candidates whose DOTTED identity matches the callee tail,
+     * and the subset of those whose arity fence equals the call site's. An
+     * arity fence is a discriminator, not part of the tail the callee text
+     * names, so it is stripped before comparing -- without that, every fenced
+     * definition is invisible to the one strategy built to disambiguate a
+     * qualified callee. */
     const char *match = NULL;
+    int match_count = 0;
+    const char *arity_match = NULL;
+    int arity_match_count = 0;
     for (int i = 0; i < arr->count; i++) {
         const char *qn = arr->items[i];
-        size_t qlen = strlen(qn);
+        char bare[CBM_SZ_512];
+        const char *cmp_qn = qn;
+        int cand_arity = r->has_arity_fence ? cbm_qn_fence_arity(qn) : CBM_ARITY_NONE;
+        if (cand_arity >= 0) {
+            const char *fence = strrchr(qn, '#');
+            size_t blen = (size_t)(fence - qn);
+            if (blen >= sizeof(bare)) {
+                continue;
+            }
+            memcpy(bare, qn, blen);
+            bare[blen] = '\0';
+            cmp_qn = bare;
+        }
+        size_t qlen = strlen(cmp_qn);
         if (qlen < w) {
             continue;
         }
-        const char *tail = qn + (qlen - w);
+        const char *tail = cmp_qn + (qlen - w);
         if (strcmp(tail, dotted) != 0) {
             continue;
         }
         /* Segment boundary: tail is the whole QN or is preceded by '.'. */
-        if (tail != qn && tail[-1] != '.') {
+        if (tail != cmp_qn && tail[-SKIP_ONE] != '.') {
             continue;
         }
-        if (match) {
-            return NULL; /* ambiguous — more than one qualified tail matches */
-        }
+        match_count++;
         match = qn;
+        if (arity >= 0 && cand_arity == arity) {
+            arity_match_count++;
+            arity_match = qn;
+        }
     }
-    return match;
+    if (arity_match_count == CBM_COUNT_ONE) {
+        return arity_match;
+    }
+    if (match_count == CBM_COUNT_ONE) {
+        return match;
+    }
+    return NULL; /* zero, or several and no arity to choose between them */
 }
 
 /* A dotted callee whose FIRST segment starts upper-case names a type — URLSession,
@@ -1283,10 +1426,35 @@ static bool receiver_chain_admits(const char *callee_name, const char *candidate
     return false;
 }
 
+/* Arities of one function look like several candidates to every scorer in
+ * resolve_name_lookup. When the call site wrote N arguments and exactly one
+ * candidate is fenced at N, that IS the answer -- letting import distance
+ * choose instead would pick by path proximity among functions that are not even
+ * interchangeable. Only fenced candidates are considered, so a language with no
+ * fences reaches this with nothing to match and gets NULL. */
+static const char *sole_fenced_candidate(const cbm_registry_t *r, const qn_array_t *arr,
+                                         const char *callee_name, int arity) {
+    if (arity < 0 || arr->count <= CBM_COUNT_ONE || !r->has_arity_fence) {
+        return NULL;
+    }
+    const char *fenced = NULL;
+    int fenced_count = 0;
+    for (int i = 0; i < arr->count; i++) {
+        if (cbm_qn_fence_arity(arr->items[i]) == arity) {
+            fenced_count++;
+            fenced = arr->items[i];
+        }
+    }
+    if (fenced_count != CBM_COUNT_ONE || !receiver_chain_admits(callee_name, fenced)) {
+        return NULL;
+    }
+    return fenced;
+}
+
 /* Strategy 3+4: Name lookup + suffix match */
 static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char *callee_name,
-                                            const char *module_qn, const char **import_vals,
-                                            int import_count) {
+                                            const char *module_qn, int arity,
+                                            const char **import_vals, int import_count) {
     const char *lookup = simple_name(callee_name);
     qn_array_t *arr = cbm_ht_get(r->by_name, lookup);
     if (!arr || arr->count == 0) {
@@ -1300,10 +1468,15 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
      * candidates by full qualified tail, before bare-name scoring collapses
      * them onto a single winner. */
     if (arr->count > 1) {
-        const char *q = qualified_suffix_match(arr, callee_name);
+        const char *q = qualified_suffix_match(r, arr, callee_name, arity);
         if (q) {
             return (cbm_resolution_t){q, "qualified_suffix", CONF_QUALIFIED_SUFFIX, REG_RESOLVED};
         }
+    }
+
+    const char *fenced = sole_fenced_candidate(r, arr, callee_name, arity);
+    if (fenced) {
+        return (cbm_resolution_t){fenced, "unique_name", CONF_UNIQUE_NAME, REG_RESOLVED};
     }
 
     /* Strategy 3: unique name */
@@ -1338,8 +1511,11 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
 /* The strategy chain shared by both public resolve variants (no caching here —
  * cbm_registry_resolve owns the per-file cache). */
 static cbm_resolution_t registry_resolve_chain(const cbm_registry_t *r, const char *callee_name,
-                                               const char *module_qn, const char **import_map_keys,
+                                               const char *module_qn, const cbm_resolve_ctx_t *rx,
+                                               const char **import_map_keys,
                                                const char **import_map_vals, int import_map_count) {
+    const char *container_qn = rx ? rx->container_qn : NULL;
+    int arity = rx ? rx->arity : CBM_ARITY_NONE;
     /* Split callee at the first path separator: "pkg.Func" → prefix="pkg",
      * suffix="Func".  Rust/C++ use "::" rather than ".", so honor whichever
      * separator appears first ("lib::square" → prefix="lib", suffix="square").
@@ -1372,11 +1548,12 @@ static cbm_resolution_t registry_resolve_chain(const cbm_registry_t *r, const ch
         resolve_import_map(r, prefix, suffix, import_map_keys, import_map_vals, import_map_count);
     if (!(res.qualified_name && res.qualified_name[0])) {
         /* Strategy 2: same module */
-        res = resolve_same_module(r, callee_name, suffix, module_qn);
+        res = resolve_same_module(r, callee_name, suffix, module_qn, container_qn, arity);
     }
     if (!(res.qualified_name && res.qualified_name[0])) {
         /* Strategy 3+4: name lookup */
-        res = resolve_name_lookup(r, callee_name, module_qn, import_map_vals, import_map_count);
+        res = resolve_name_lookup(r, callee_name, module_qn, arity, import_map_vals,
+                                  import_map_count);
     }
     return res;
 }
@@ -1384,22 +1561,54 @@ static cbm_resolution_t registry_resolve_chain(const cbm_registry_t *r, const ch
 cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
                                       const char *module_qn, const char **import_map_keys,
                                       const char **import_map_vals, int import_map_count) {
+    return cbm_registry_resolve_ctx(r, callee_name, module_qn, NULL, import_map_keys,
+                                    import_map_vals, import_map_count);
+}
+
+cbm_resolution_t cbm_registry_resolve_ctx(const cbm_registry_t *r, const char *callee_name,
+                                          const char *module_qn, const cbm_resolve_ctx_t *rx,
+                                          const char **import_map_keys,
+                                          const char **import_map_vals, int import_map_count) {
     if (!r || !callee_name) {
         return empty_result();
     }
+    const char *container_qn = rx ? rx->container_qn : NULL;
+    int arity = rx ? rx->arity : CBM_ARITY_NONE;
 
     /* Per-file cache: same callee_name in N call sites → 1 chain walk
-     * + N-1 O(1) hash hits. module_qn is constant per file so the
-     * cache key only needs callee_name. */
-    if (_resolve_cache) {
+     * + N-1 O(1) hash hits. module_qn is constant per file, but container_qn
+     * is NOT — one Elixir file holds several defmodules — so a container makes
+     * it part of the key. */
+    /* The per-file cache key is the callee name alone unless something else
+     * can change the answer. `container_qn` can: one file holds several
+     * source-named containers. `arity` can only where a registered QN carries
+     * a fence -- widening the key for every language would split one entry per
+     * distinct argument count and buy nothing. */
+    bool arity_matters = arity >= 0 && r->has_arity_fence;
+    char keybuf[CBM_SZ_512];
+    const char *cache_key = callee_name;
+    if ((container_qn && container_qn[0]) || arity_matters) {
+        int written =
+            snprintf(keybuf, sizeof(keybuf), "%s\x1f%d\x1f%s", container_qn ? container_qn : "",
+                     arity_matters ? arity : CBM_ARITY_NONE, callee_name);
+        /* A truncated key loses its TAIL, which is the callee. cbm_qn_container_buf
+         * admits a container_qn up to 511 bytes, so past about 505 every callee in
+         * that container collides on one entry and the second lookup answers with
+         * the first's resolved QN. That is deterministic, and a wrong edge rather
+         * than a missing one. The cache is a pure optimization over
+         * registry_resolve_chain, so decline it instead of answering from a key
+         * that no longer identifies the question. */
+        cache_key = (written > 0 && (size_t)written < sizeof(keybuf)) ? keybuf : NULL;
+    }
+    if (cache_key && _resolve_cache) {
         resolve_cache_entry_t *cached =
-            (resolve_cache_entry_t *)cbm_ht_get(_resolve_cache, callee_name);
+            (resolve_cache_entry_t *)cbm_ht_get(_resolve_cache, cache_key);
         if (cached) {
             return cached->res;
         }
     }
 
-    cbm_resolution_t res = registry_resolve_chain(r, callee_name, module_qn, import_map_keys,
+    cbm_resolution_t res = registry_resolve_chain(r, callee_name, module_qn, rx, import_map_keys,
                                                   import_map_vals, import_map_count);
 
     /* Data relations (Table/View) are lineage-only registry members: common
@@ -1415,12 +1624,13 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
     }
 
     /* Cache the result (including empty — caching the negative answer
-     * is just as valuable; same name asks the same question). */
-    if (_resolve_cache) {
+     * is just as valuable; same name asks the same question). A NULL cache_key
+     * is the declined-key case above; there is nothing safe to file it under. */
+    if (cache_key && _resolve_cache) {
         resolve_cache_entry_t *e = (resolve_cache_entry_t *)malloc(sizeof(*e));
         if (e) {
             e->res = res;
-            char *kdup = strdup(callee_name);
+            char *kdup = strdup(cache_key);
             if (kdup) {
                 cbm_ht_set(_resolve_cache, kdup, e);
             } else {
@@ -1442,7 +1652,7 @@ cbm_resolution_t cbm_registry_resolve_lineage(const cbm_registry_t *r, const cha
      * and stores the relation-vetoed answer of the default variant — sharing
      * it would poison one variant with the other's semantics. SQL files hold
      * few distinct relation refs, so the chain walk stays cheap. */
-    return registry_resolve_chain(r, callee_name, module_qn, import_map_keys, import_map_vals,
+    return registry_resolve_chain(r, callee_name, module_qn, NULL, import_map_keys, import_map_vals,
                                   import_map_count);
 }
 

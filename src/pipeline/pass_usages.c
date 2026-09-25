@@ -24,6 +24,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
 #include "cbm.h"
+#include "helpers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -192,16 +193,32 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             if (semantic_reference) {
                 continue;
             }
-            /* SQL usages are FROM/JOIN lineage refs and may bind Table/View
+            /* The caller's own container, where the language names it in the
+             * source rather than deriving it from the path (Elixir defmodule).
+             * NULL for every other language, leaving resolution unchanged
+             * there. Must mirror the parallel twin (pass_parallel.c) exactly. */
+            char container_buf[CBM_SZ_512];
+            const char *container_qn = NULL;
+            if (cbm_lang_container_is_source_named(lang) && usage->enclosing_func_qn &&
+                (!module_qn || strcmp(usage->enclosing_func_qn, module_qn) != 0) &&
+                cbm_qn_container_buf(container_buf, sizeof(container_buf),
+                                     usage->enclosing_func_qn)) {
+                container_qn = container_buf;
+            }
+            /* A usage is a reference, not an invocation: no argument list, so
+             * no arity to offer.
+             *
+             * SQL usages are FROM/JOIN lineage refs and may bind Table/View
              * targets (cbm_registry_resolve_lineage); every other language
-             * resolves through the default variant, whose central relation
-             * veto keeps same-named code identifiers out of the lineage layer. */
+             * resolves through the default variant, whose central relation veto
+             * keeps same-named code identifiers out of the lineage layer. */
+            cbm_resolve_ctx_t rx = {.container_qn = container_qn, .arity = CBM_ARITY_NONE};
             cbm_resolution_t res =
                 (lang == CBM_LANG_SQL)
                     ? cbm_registry_resolve_lineage(ctx->registry, usage->ref_name, module_qn,
                                                    imp_keys, imp_vals, imp_count)
-                    : cbm_registry_resolve(ctx->registry, usage->ref_name, module_qn, imp_keys,
-                                           imp_vals, imp_count);
+                    : cbm_registry_resolve_ctx(ctx->registry, usage->ref_name, module_qn, &rx,
+                                               imp_keys, imp_vals, imp_count);
             if (!res.qualified_name || res.qualified_name[0] == '\0') {
                 continue;
             }
