@@ -5477,9 +5477,18 @@ static TSNode elixir_call_args(TSNode node) {
 // responsible are the typespec heads the widened span now covers -- `@spec
 // f(t) :: u` puts the declared name in a `call` node, and the unified walk
 // reads it as code -- a separate defect with a separate fix, not something this
-// fold can close. What the fold and the head suppression together remove is
-// 2,436 edges, none of them added back: see elixir_call_is_definition_role in
-// extract_calls.c.
+// fold can close.
+//
+// Skipping the typespec subtrees, later in this stack, closes that half: the
+// same method then reports 389 self_recursive Function nodes and 8 with no
+// self-call form, against 129 and 6 on the base. All 8 are the pre-existing
+// phantom a local variable sharing the function's name mints (`defp slug(value)
+// do slug = ...`), 6 of them already present on the base; the other 2 are
+// guarded clauses that only have a node of their own to be flagged on because
+// of this stack.
+//
+// What the fold and the head suppression together remove is 2,436 edges, none
+// of them added back: see elixir_call_is_definition_role in extract_calls.c.
 //
 // A clause whose macro differs (`def` foo/1 beside `defp` foo/2) still folds,
 // because the arity-free QN already puts both on one node; is_exported is then
