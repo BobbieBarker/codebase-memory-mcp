@@ -606,8 +606,13 @@ static bool is_elixir_def_binding(CBMExtractCtx *ctx, TSNode node) {
             continue;
         }
         TSNode head = ts_node_named_child(form, 0);
+        /* Must list the same four macros the calls walk suppresses a head for.
+         * A head declined there but not treated as a binding here does not lose
+         * its phantom, it is relabelled: handle_usages reaches the bare
+         * identifier handle_calls just declined and mints a USAGE onto the same
+         * function. */
         if (!text_equals(ctx, head, "def") && !text_equals(ctx, head, "defp") &&
-            !text_equals(ctx, head, "defmacro")) {
+            !text_equals(ctx, head, "defmacro") && !text_equals(ctx, head, "defmacrop")) {
             continue;
         }
         TSNode arguments = ts_node_child_by_field_name(form, TS_FIELD("arguments"));
