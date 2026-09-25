@@ -2308,6 +2308,34 @@ TEST(elixir_call_scope_qn_matches_def_qn) {
     PASS();
 }
 
+/* A qualified reference used to reach the registry as the BARE name: the
+ * extractor recorded `get` for `Keyword.get(opts, :reason)` and threw the
+ * qualifier away, so receiver_chain_admits returned true at its bare-name
+ * early return and every receiver-chain protection was bypassed. */
+TEST(elixir_usage_records_receiver) {
+    CBMFileResult *r = extract("defmodule Fx.Store do\n"
+                               "  def run(opts) do\n"
+                               "    Keyword.get(opts, :reason)\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/store.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int seen = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (!r->usages.items[i].ref_name ||
+            strcmp(r->usages.items[i].ref_name, "get") != 0) {
+            continue;
+        }
+        seen = 1;
+        ASSERT_NOT_NULL(r->usages.items[i].receiver);
+        ASSERT_STR_EQ("Keyword", r->usages.items[i].receiver);
+    }
+    ASSERT_EQ(1, seen);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Haskell --- */
 TEST(haskell_function) {
     CBMFileResult *r = extract("add :: Int -> Int -> Int\nadd x y = x + y\n\nmultiply :: Int -> "
@@ -8966,6 +8994,75 @@ static size_t arena_capacity(const CBMArena *a) {
     return total;
 }
 
+/* True when `p` points inside one of the arena's own blocks. After
+ * cbm_result_compact there is exactly one, so this is "did compaction relocate
+ * this string, or is it still pointing at the freed pre-compaction arena". */
+static bool in_arena(const CBMArena *a, const void *p) {
+    for (int i = 0; i < a->nblocks; i++) {
+        const char *base = a->blocks[i];
+        if (base && (const char *)p >= base && (const char *)p < base + a->block_sizes[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* cbm_result_compact copies a CBMFileResult into one exact arena block and
+ * frees the old one, so EVERY arena-owned pointer the result holds has to be
+ * named in cr_walk. A field that is not stays pointing into freed memory, and
+ * the failure is silent: nothing crashes, the bytes still parse as a string,
+ * and the pipeline builds a real-looking edge out of whatever the recycled
+ * memory now holds -- a different edge on every run of the same input.
+ *
+ * The sibling test above uses a Python fixture, where a usage's `receiver` is
+ * always NULL, so it cannot see an unrelocated receiver at all. This one uses
+ * a qualified Elixir reference, which is the shape that sets it, and asserts
+ * containment rather than string equality: a stale pointer very often still
+ * reads the right characters, which is exactly why this defect survives a
+ * value comparison. */
+TEST(extract_compact_relocates_every_usage_string) {
+    CBMFileResult *r = extract("defmodule Fx.Runner do\n"
+                               "  def run(opts) do\n"
+                               "    Keyword.get(opts, :reason)\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/runner.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* The fixture has to actually produce the field under test. */
+    int with_receiver = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].receiver) {
+            with_receiver++;
+            ASSERT_STR_EQ("Keyword", r->usages.items[i].receiver);
+        }
+    }
+    ASSERT_EQ(1, with_receiver);
+
+    cbm_result_compact(r);
+    ASSERT_EQ(r->arena.nblocks, 1);
+
+    with_receiver = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        const CBMUsage *u = &r->usages.items[i];
+        if (u->ref_name && u->ref_name[0]) {
+            ASSERT(in_arena(&r->arena, u->ref_name));
+        }
+        if (u->enclosing_func_qn && u->enclosing_func_qn[0]) {
+            ASSERT(in_arena(&r->arena, u->enclosing_func_qn));
+        }
+        if (u->receiver) {
+            with_receiver++;
+            ASSERT(in_arena(&r->arena, u->receiver));
+            ASSERT_STR_EQ("Keyword", u->receiver);
+        }
+    }
+    ASSERT_EQ(1, with_receiver);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_compact_keeps_every_field_and_shrinks_the_arena) {
     CBMFileResult *r = extract(COMPACT_PY_SRC, CBM_LANG_PYTHON, "t", "svc.py");
     CBMFileResult *ref = extract(COMPACT_PY_SRC, CBM_LANG_PYTHON, "t", "svc.py");
@@ -9293,6 +9390,7 @@ SUITE(extraction) {
     RUN_TEST(extract_spill_round_trip_keeps_every_field);
     RUN_TEST(extract_lsp_skipped_file_gets_no_walk);
     RUN_TEST(extract_walk_truncated_when_a_node_budget_is_set);
+    RUN_TEST(extract_compact_relocates_every_usage_string);
     /* Initialize extraction library */
     cbm_init();
 
@@ -9440,6 +9538,7 @@ SUITE(extraction) {
     RUN_TEST(elixir_defs_inside_macro_blocks_are_extracted);
     RUN_TEST(elixir_multi_clause_function_stays_one_identity);
     RUN_TEST(elixir_call_scope_qn_matches_def_qn);
+    RUN_TEST(elixir_usage_records_receiver);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(extract_elixir_guarded_def_head_scope);
     RUN_TEST(extract_elixir_guarded_def_head_guard_usages);

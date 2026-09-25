@@ -205,6 +205,19 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
                                      usage->enclosing_func_qn)) {
                 container_qn = container_buf;
             }
+            /* Resolve under the qualifier the reference was actually written
+             * with. A bare name reaches receiver_chain_admits' bare-name early
+             * return, so every receiver-chain protection is bypassed; the
+             * qualified form is what lets the guard reject an unrelated local
+             * of the same name and lets qualified_suffix_match find the real
+             * one. The EDGE property still reports ref_name. */
+            char qualified_ref[CBM_SZ_512];
+            const char *resolve_ref = usage->ref_name;
+            if (usage->receiver && usage->receiver[0]) {
+                (void)snprintf(qualified_ref, sizeof(qualified_ref), "%s.%s", usage->receiver,
+                               usage->ref_name);
+                resolve_ref = qualified_ref;
+            }
             /* A usage is a reference, not an invocation: no argument list, so
              * no arity to offer.
              *
@@ -215,10 +228,10 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             cbm_resolve_ctx_t rx = {.container_qn = container_qn, .arity = CBM_ARITY_NONE};
             cbm_resolution_t res =
                 (lang == CBM_LANG_SQL)
-                    ? cbm_registry_resolve_lineage(ctx->registry, usage->ref_name, module_qn,
-                                                   imp_keys, imp_vals, imp_count)
-                    : cbm_registry_resolve_ctx(ctx->registry, usage->ref_name, module_qn, &rx,
-                                               imp_keys, imp_vals, imp_count);
+                    ? cbm_registry_resolve_lineage(ctx->registry, resolve_ref, module_qn, imp_keys,
+                                                   imp_vals, imp_count)
+                    : cbm_registry_resolve_ctx(ctx->registry, resolve_ref, module_qn, &rx, imp_keys,
+                                               imp_vals, imp_count);
             if (!res.qualified_name || res.qualified_name[0] == '\0') {
                 continue;
             }
