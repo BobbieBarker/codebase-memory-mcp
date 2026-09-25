@@ -5418,9 +5418,10 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 // Two bounds keep the widened span honest, and a clause folds only if it clears
 // both:
 //   - Same body block. `scope` is the block the previous clause was written in,
-//     so a def extracted from a different block cannot merge with a module-body
-//     clause of the same name and arity even when both compute the same QN
-//     under the same module and the two are array-adjacent.
+//     so a def the walk reaches inside a `quote`, `if` or `case` body cannot
+//     merge with a module-body clause of the same name and arity: both compute
+//     the same QN under the same module, and the quoted def is array-adjacent
+//     to the real one.
 //   - Same group. Only the immediately preceding EXTRACTED definition is a
 //     candidate, so a def of another name or arity between two same-named defs
 //     ends the group. That is a bound this code imposes, not a guarantee Elixir
@@ -5607,6 +5608,52 @@ static void elixir_stack_push(elixir_stack_t *s, TSNode node, const char *module
     s->count++;
 }
 
+/* True for a block kind that holds ordinary Elixir body expressions. `do_block`
+ * covers `do ... end`; the grammar hangs `else`/`rescue`/`catch`/`after` arms
+ * off it as their own block nodes, and a `->` arm is a `stab_clause` whose
+ * right-hand side is a `body`. */
+static bool elixir_is_body_block(const char *kind) {
+    return strcmp(kind, "do_block") == 0 || strcmp(kind, "else_block") == 0 ||
+           strcmp(kind, "rescue_block") == 0 || strcmp(kind, "catch_block") == 0 ||
+           strcmp(kind, "after_block") == 0 || strcmp(kind, "block") == 0 ||
+           strcmp(kind, "stab_clause") == 0 || strcmp(kind, "body") == 0;
+}
+
+/* Push every `call` reachable through `node`'s body blocks, under `module_qn`.
+ * Blocks nest (a do_block holds an else_block, a stab_clause holds a body), so
+ * this descends through block kinds and stops at the first non-block child.
+ *
+ * This is what makes a def inside `if Mix.env() == :test do`, `quote`, `case`
+ * or `for` reachable at all: the walk used to push only the direct `call`
+ * children of a defmodule's do_block and drop every other head WITHOUT
+ * descending, so conditionally compiled definitions -- ordinary Elixir --
+ * produced no node and no error. */
+#define ELIXIR_BLOCK_DESCENT_MAX 64
+
+static void elixir_push_block_calls_d(elixir_stack_t *stack, // NOLINT(misc-no-recursion)
+                                      TSNode node, const char *module_qn, int depth) {
+    if (depth > ELIXIR_BLOCK_DESCENT_MAX) {
+        return; /* pathological block nesting: bounded, not a C-stack overflow */
+    }
+    uint32_t cc = ts_node_child_count(node);
+    for (int i = (int)cc - SKIP_CHAR; i >= 0; i--) {
+        TSNode child = ts_node_child(node, (uint32_t)i);
+        if (ts_node_is_null(child)) {
+            continue;
+        }
+        const char *ck = ts_node_type(child);
+        if (strcmp(ck, "call") == 0) {
+            elixir_stack_push(stack, child, module_qn);
+        } else if (elixir_is_body_block(ck)) {
+            elixir_push_block_calls_d(stack, child, module_qn, depth + SKIP_ONE);
+        }
+    }
+}
+
+static void elixir_push_block_calls(elixir_stack_t *stack, TSNode node, const char *module_qn) {
+    elixir_push_block_calls_d(stack, node, module_qn, 0);
+}
+
 // Process Elixir call nodes iteratively — handles defmodule/def/defp/defmacro
 // without recursion between extract_elixir_call ↔ extract_elixir_module_def.
 static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
@@ -5637,20 +5684,19 @@ static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSp
         }
 
         if (strcmp(macro, "def") == 0 || strcmp(macro, "defp") == 0 ||
-            strcmp(macro, "defmacro") == 0) {
+            strcmp(macro, "defmacro") == 0 || strcmp(macro, "defmacrop") == 0) {
             extract_elixir_func_def(ctx, cur, macro, frame.module_qn, &def_scope);
         } else if (strcmp(macro, "defmodule") == 0) {
             const char *module_qn = NULL;
             TSNode do_block = emit_elixir_module_class(ctx, cur, frame.module_qn, &module_qn);
             if (!ts_node_is_null(do_block)) {
-                uint32_t dbc = ts_node_child_count(do_block);
-                for (int di = (int)dbc - SKIP_CHAR; di >= 0; di--) {
-                    TSNode dchild = ts_node_child(do_block, (uint32_t)di);
-                    if (!ts_node_is_null(dchild) && strcmp(ts_node_type(dchild), "call") == 0) {
-                        elixir_stack_push(&stack, dchild, module_qn);
-                    }
-                }
+                elixir_push_block_calls(&stack, do_block, module_qn);
             }
+        } else {
+            /* Any other macro head (if/unless/case/cond/for/with/try/quote,
+             * defimpl/defprotocol, a user macro) can still hold definitions in
+             * its body. Descend through its blocks under the SAME module. */
+            elixir_push_block_calls(&stack, cur, frame.module_qn);
         }
     }
 }

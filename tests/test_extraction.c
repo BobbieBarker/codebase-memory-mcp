@@ -1728,6 +1728,35 @@ TEST(extract_elixir_nested_module_clauses_do_not_fold) {
     PASS();
 }
 
+/* The block bound on the fold, which the QN cannot supply. A def written inside
+ * a `quote` body belongs to the same module and computes the SAME
+ * (module, name, arity) QN as a module-body clause of that name, and the walk
+ * extracts it immediately after -- so only "same body block" keeps a quoted
+ * template out of the real function's span. */
+TEST(extract_elixir_quoted_clause_does_not_fold_into_a_sibling) {
+    CBMFileResult *r = extract("defmodule Tmpl do\n"           /* 1 */
+                               "  def x(a), do: a\n"           /* 2 */
+                               "  quote do\n"                  /* 3 */
+                               "    def x(b), do: b\n"         /* 4 */
+                               "  end\n"                       /* 5 */
+                               "end\n",                        /* 6 */
+                               CBM_LANG_ELIXIR, "t", "tmpl.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(2, count_defs_named(r, "Function", "x"));
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->label, "Function") != 0 || strcmp(d->name, "x") != 0) {
+            continue;
+        }
+        /* Same QN, different blocks: neither span swallowed the other. */
+        ASSERT_STR_EQ("t.tmpl.Tmpl.x#1", d->qualified_name);
+        ASSERT_EQ((int)d->start_line, (int)d->end_line);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Folding clauses has to decide is_exported for the merged node. A `def` clause
  * and a `defp` clause of the same name AND arity are clauses of one function --
  * a private guard clause or a nil short-circuit written above the public head
@@ -1883,6 +1912,44 @@ static int elixir_any_ref_count(CBMFileResult *r, const char *name) {
         }
     }
     return count;
+}
+
+/* The four macros that mint a Function have to be the same four in every walk.
+ * The def walk minted one for `defmacrop`; the calls walk did not know the head,
+ * so it emitted it as an invocation of the macro being defined, and that phantom
+ * lands inside the macro's own span -- a private macro reporting itself
+ * recursive. A def head is only ever removed, never relabelled, when the usages
+ * walk treats the same four as bindings, so both lists are pinned here. */
+TEST(extract_elixir_private_macro_head_is_not_a_self_call) {
+    CBMFileResult *r = extract("defmodule Wrap do\n"                         /* 1 */
+                               "  defmacrop source_call(do: expr) do\n"      /* 2 */
+                               "    quote do: unquote(expr)\n"               /* 3 */
+                               "  end\n"                                     /* 4 */
+                               "\n"                                          /* 5 */
+                               "  def run(x) do\n"                           /* 6 */
+                               "    source_call do: x\n"                     /* 7 */
+                               "  end\n"                                     /* 8 */
+                               "end\n",                                      /* 9 */
+                               CBM_LANG_ELIXIR, "t", "wrap.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* The macro is a definition and a private one. */
+    ASSERT_EQ(1, count_defs_named(r, "Function", "source_call"));
+    ASSERT(has_def_qn(r, "t.wrap.Wrap.source_call#1"));
+    const CBMDefinition *mac = elixir_first_def(r, "source_call");
+    ASSERT_NOT_NULL(mac);
+    ASSERT_FALSE(mac->is_exported);
+    ASSERT_FALSE(mac->is_recursive);
+    ASSERT_EQ(2, (int)mac->start_line);
+
+    /* Exactly one reference to it exists in this file -- the invocation in
+     * `run` -- and it is a CALL from `run`, not a relabelled usage and not a
+     * second one minted by the macro's own head. */
+    ASSERT_EQ(1, count_calls_named(r, "source_call"));
+    ASSERT_EQ(1, count_calls_from(r, "source_call", "t.wrap.Wrap.run#1"));
+    ASSERT_EQ(1, elixir_any_ref_count(r, "source_call"));
+    cbm_free_result(r);
+    PASS();
 }
 
 /* The head suppression has to REMOVE the phantom, not relabel it. What makes
@@ -2153,6 +2220,39 @@ TEST(elixir_def_records_parent_module) {
         ASSERT_EQ(1, r->defs.items[i].param_count);
     }
     ASSERT_EQ(1, seen);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The walk used to push only the DIRECT `call` children of a defmodule's
+ * do_block and drop every other head without descending, so a def inside
+ * `if Mix.env() == :test do`, `quote`, `case` or `for` produced no node at
+ * all -- silently, since a missing definition is not an error. Conditional
+ * compilation is ordinary Elixir: on one real 3-module file this hid 42 of
+ * 48 def heads. */
+TEST(elixir_defs_inside_macro_blocks_are_extracted) {
+    CBMFileResult *r = extract("defmodule Nest do\n"
+                               "  def top(x), do: x\n"
+                               "  if true do\n"
+                               "    def inside_if(x), do: x\n"
+                               "  else\n"
+                               "    def inside_else(x), do: x\n"
+                               "  end\n"
+                               "  case :a do\n"
+                               "    :a -> def inside_case(x), do: x\n"
+                               "  end\n"
+                               "  quote do\n"
+                               "    def inside_quote(x), do: x\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "lib/nest.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def_qn(r, "t.lib.nest.Nest.top#1"));
+    ASSERT(has_def_qn(r, "t.lib.nest.Nest.inside_if#1"));
+    ASSERT(has_def_qn(r, "t.lib.nest.Nest.inside_else#1"));
+    ASSERT(has_def_qn(r, "t.lib.nest.Nest.inside_case#1"));
+    ASSERT(has_def_qn(r, "t.lib.nest.Nest.inside_quote#1"));
     cbm_free_result(r);
     PASS();
 }
@@ -9327,14 +9427,17 @@ SUITE(extraction) {
     RUN_TEST(extract_elixir_clauses_fold_only_when_adjacent_in_one_module);
     RUN_TEST(extract_elixir_clauses_of_different_arity_do_not_fold);
     RUN_TEST(extract_elixir_nested_module_clauses_do_not_fold);
+    RUN_TEST(extract_elixir_quoted_clause_does_not_fold_into_a_sibling);
     RUN_TEST(extract_elixir_folded_clause_is_exported_is_the_or);
     RUN_TEST(extract_elixir_guarded_clause_head_is_not_a_self_call);
+    RUN_TEST(extract_elixir_private_macro_head_is_not_a_self_call);
     RUN_TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind);
     RUN_TEST(extract_elixir_real_recursion_survives_head_suppression);
     RUN_TEST(extract_elixir_typespec_attribute_is_not_code);
     RUN_TEST(elixir_def_qn_carries_module_and_arity);
     RUN_TEST(elixir_same_named_defs_in_sibling_modules_are_distinct);
     RUN_TEST(elixir_def_records_parent_module);
+    RUN_TEST(elixir_defs_inside_macro_blocks_are_extracted);
     RUN_TEST(elixir_multi_clause_function_stays_one_identity);
     RUN_TEST(elixir_call_scope_qn_matches_def_qn);
     RUN_TEST(elixir_call_string_argument);
