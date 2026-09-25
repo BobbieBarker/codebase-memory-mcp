@@ -91,6 +91,47 @@ static int count_defs_named(CBMFileResult *r, const char *label, const char *nam
     return count;
 }
 
+/* Count calls to `callee` whose enclosing scope is exactly `scope_qn`. A call the
+ * scope walk failed to place carries the FILE or module QN here, so a bare count
+ * of the callee passes just as happily with every call homed on the file. */
+static int count_calls_from(CBMFileResult *r, const char *callee, const char *scope_qn) {
+    int count = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && r->calls.items[i].enclosing_func_qn &&
+            strcmp(r->calls.items[i].callee_name, callee) == 0 &&
+            strcmp(r->calls.items[i].enclosing_func_qn, scope_qn) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/* Count usages of `ref` attributed to exactly `scope_qn`, and to any scope. A
+ * def head is a BINDING, not a usage, so the pair separates two different
+ * mistakes: too few rows means a read was swallowed by the binding, too many
+ * means a binding site was counted as a read. */
+static int count_usages_from(CBMFileResult *r, const char *ref, const char *scope_qn) {
+    int count = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && r->usages.items[i].enclosing_func_qn &&
+            strcmp(r->usages.items[i].ref_name, ref) == 0 &&
+            strcmp(r->usages.items[i].enclosing_func_qn, scope_qn) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int count_usages_named(CBMFileResult *r, const char *ref) {
+    int count = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, ref) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
 static int count_calls_named(CBMFileResult *r, const char *callee) {
     int count = 0;
     for (int i = 0; i < r->calls.count; i++) {
@@ -1453,6 +1494,95 @@ TEST(extract_elixir_guarded_def_head) {
      * handled; only the `when` token admits the unwrap. */
     ASSERT_EQ(count_defs_named(r, "Function", "a"), 0);
     ASSERT_EQ(count_defs_named(r, "Function", "c"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A guard hides the head from the scope walk and from the calls walk.
+ * compute_elixir_func_qn accepts only a `call` or an `identifier` as a def's
+ * first argument, so a guarded clause resolved no QN and opened NO function
+ * scope: every call in its body was attributed to the FILE node, the function
+ * reported no outgoing edges, and its callees gained an in-edge from the file
+ * instead of from their caller. A paren-less guarded clause (`def f when g`) is
+ * worse still: it has no inner call node at all, so the guard operator itself
+ * falls through to extract_callee_name's first-identifier last resort and mints
+ * a phantom CALLS edge naming the function being defined. */
+TEST(extract_elixir_guarded_def_head_scope) {
+    CBMFileResult *r = extract("defmodule Guards do\n"
+                               "  def target(x), do: x\n"
+                               "  def other(x), do: x\n"
+                               "  def unguarded_caller(a), do: target(a)\n"
+                               "  def guarded_caller(a) when is_binary(a) do\n"
+                               "    target(a)\n"
+                               "    other(a)\n"
+                               "  end\n"
+                               "  def bare_guarded when true, do: target(:ok)\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "guard_scope.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* A paren-less guarded head is a definition, never a call to itself. */
+    ASSERT_EQ(count_calls_named(r, "bare_guarded"), 0);
+
+    /* Both calls in the guarded body source to the guarded function, and the
+     * paren-less clause's body call to that clause. */
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.guarded_caller"), 1);
+    ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope.guarded_caller"), 1);
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.bare_guarded"), 1);
+
+    /* Control on the path the fix does not touch: an unguarded clause still
+     * sources its body call to itself. This is NOT a leak detector -- the walk
+     * expires scopes by tree depth (pop_expired_scopes), so a sibling clause
+     * always unwinds the previous one before pushing its own and "pushed but
+     * never popped" is not a state this walk can reach. */
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope.unguarded_caller"), 1);
+
+    /* Nothing falls back to the file node. */
+    ASSERT_EQ(count_calls_from(r, "target", "t.guard_scope"), 0);
+    ASSERT_EQ(count_calls_from(r, "other", "t.guard_scope"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The half the calls and scope assertions above cannot see: the usages walk
+ * asks whether an identifier sits inside the def's SIGNATURE, and treats
+ * everything that does as part of the binding rather than as a reference. A
+ * guard makes that signature the whole `when` operator, which spans the guard
+ * expression too -- so `a` read by `is_binary(a)` was classified as its own
+ * binding and emitted no USAGE row at all. A guard is an expression, not a
+ * pattern: the parameters are bound by `guarded(a, b)` and every mention of one
+ * to its right is a read, exactly as the same mention in the body already is.
+ * Unwrapping the signature to the head restores those rows without admitting
+ * the binding sites themselves, which is why each name is asserted both within
+ * its scope and in total. */
+TEST(extract_elixir_guarded_def_head_guard_usages) {
+    CBMFileResult *r = extract("defmodule GuardUsage do\n"
+                               "  def plain(x), do: x\n"
+                               "  def guarded(a, b) when is_binary(a) and byte_size(a) > 3 do\n"
+                               "    b\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "guard_usage.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* Both guard reads of the parameter are usages of the guarded clause. */
+    ASSERT_EQ(count_usages_from(r, "a", "t.guard_usage.guarded"), 2);
+    /* ...and nothing else claims `a`: the `a` in `guarded(a, b)` binds it. */
+    ASSERT_EQ(count_usages_named(r, "a"), 2);
+
+    /* The body read is unchanged, and the head's `b` is still a binding --
+     * an unwrap that took the guard instead of the head would add both head
+     * parameters here. */
+    ASSERT_EQ(count_usages_from(r, "b", "t.guard_usage.guarded"), 1);
+    ASSERT_EQ(count_usages_named(r, "b"), 1);
+
+    /* Control: an unguarded clause was never affected either way. */
+    ASSERT_EQ(count_usages_from(r, "x", "t.guard_usage.plain"), 1);
+    ASSERT_EQ(count_usages_named(r, "x"), 1);
+
     cbm_free_result(r);
     PASS();
 }
@@ -8939,6 +9069,8 @@ SUITE(extraction) {
     RUN_TEST(extract_elixir_declaration_head_mints_no_reference_of_any_kind);
     RUN_TEST(extract_elixir_real_recursion_survives_head_suppression);
     RUN_TEST(elixir_call_string_argument);
+    RUN_TEST(extract_elixir_guarded_def_head_scope);
+    RUN_TEST(extract_elixir_guarded_def_head_guard_usages);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
     RUN_TEST(erlang_function);

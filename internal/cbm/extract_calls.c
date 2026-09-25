@@ -802,7 +802,23 @@ static bool call_node_is_definition_container(CBMLanguage lang, TSNode node, con
     if (lang == CBM_LANG_AGDA && strcmp(kind, "expr") == 0) {
         return agda_expr_is_definition_role(node);
     }
-    return lang == CBM_LANG_ELIXIR && strcmp(kind, "call") == 0 &&
+    /* A guarded head is a `when` binary_operator, not a `call`, and Elixir's
+     * call node types include binary_operator -- so the head reaches this walk
+     * and must be able to answer that it is a definition. A paren-less clause
+     * (`def f when g`) has no inner call at all, so the operator node itself
+     * reaches extract_callee_name and, with no callee of its own, takes that
+     * function's last resort -- the first identifier child -- minting a phantom
+     * CALLS edge onto the very function being defined.
+     *
+     * That last resort overrides a deliberate NULL for every Elixir
+     * binary_operator extract_scripting_callee declines (`=`, `<-`, `->`, `\\`,
+     * `::`, `when`), so `def g(c \\ 2)` still emits a phantom `c` and
+     * `e = target(d)` a phantom `e`. That is the pre-existing behaviour for
+     * those operators and is untouched here: only a `when` operator is
+     * admitted, so an operator definition's own head (`def a + b`) stays an
+     * ordinary node, as it was before guards were handled at all. */
+    return lang == CBM_LANG_ELIXIR &&
+           (strcmp(kind, "call") == 0 || cbm_elixir_is_when_guard(node)) &&
            elixir_call_is_definition_role(node, source);
 }
 
