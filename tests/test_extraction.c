@@ -16,6 +16,8 @@
 #include "result_spill.h"
 #include "pipeline/pass_lsp_cross.h"
 #include "iris_export_xml.h"
+#include "helpers.h"
+#include "lang_specs.h"
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -1243,6 +1245,167 @@ TEST(elixir_function) {
     ASSERT_FALSE(r->has_error);
     ASSERT(has_def(r, "Function", "greet"));
     cbm_free_result(r);
+    PASS();
+}
+
+/* ── Elixir def-head guard helpers (internal/cbm/helpers.c) ─────────
+ *
+ * `def name(args) when guard` parses its WHOLE head as one `when`
+ * binary_operator whose left operand is the `name(args)` call, and Elixir
+ * admits more than one guard on a clause, which tree-sitter-elixir nests
+ * right-associatively. Four walks read that same first argument and each asks a
+ * different question of it: the defs and call-scope walks want the head UNDER
+ * every guard, the usages walk wants it so that a parameter READ by the guard
+ * stays outside the binding, and the calls walk wants to know whether the node
+ * it is visiting IS that head or one of the guard operators above it.
+ *
+ * That last question is why cbm_elixir_def_head_is exists beside the unwrap,
+ * and it is exercised here on the AST rather than through cbm_extract_file
+ * because the two routes it has to answer for are indistinguishable from
+ * outside: `def f(x) when g` reaches the calls walk as the inner `f(x)` call,
+ * which the unwrap reaches, while `def f when g` has no inner call at all and
+ * reaches it as the `when` operator itself, which the unwrap does not. A test
+ * that only drives one walk sees whichever of the two that walk happens to hit.
+ *
+ * This file's helpers change no extraction behaviour on their own; the walks
+ * that consume them are separate changes. */
+
+enum { ELIXIR_HEAD_PROBE_MAX = 16, ELIXIR_HEAD_STACK_MAX = 256 };
+
+static bool head_probe_text_is(const char *source, TSNode node, const char *want) {
+    if (ts_node_is_null(node)) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    size_t len = strlen(want);
+    return end >= start && (size_t)(end - start) == len && memcmp(source + start, want, len) == 0;
+}
+
+/* The first argument of every `def`/`defp` call under `root`, in source order.
+ * That argument is what all four walks read, so it is what the helpers take. */
+typedef struct {
+    TSNode signature[ELIXIR_HEAD_PROBE_MAX];
+    int count;
+} elixir_head_probe_t;
+
+static void collect_elixir_def_signatures(TSNode root, const char *source,
+                                          elixir_head_probe_t *out) {
+    TSNode stack[ELIXIR_HEAD_STACK_MAX];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0) {
+        TSNode cur = stack[--top];
+        uint32_t cc = ts_node_child_count(cur);
+        if (cc > 1 && strcmp(ts_node_type(cur), "call") == 0 &&
+            (head_probe_text_is(source, ts_node_child(cur, 0), "def") ||
+             head_probe_text_is(source, ts_node_child(cur, 0), "defp")) &&
+            out->count < ELIXIR_HEAD_PROBE_MAX) {
+            TSNode args = ts_node_child(cur, 1);
+            if (!ts_node_is_null(args) && ts_node_child_count(args) > 0) {
+                out->signature[out->count++] = ts_node_child(args, 0);
+            }
+        }
+        for (int i = (int)cc - 1; i >= 0 && top < ELIXIR_HEAD_STACK_MAX; i--) {
+            stack[top++] = ts_node_child(cur, (uint32_t)i);
+        }
+    }
+}
+
+TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it) {
+    const char *source = "defmodule Heads do\n"
+                         "  def plain(x), do: x\n"
+                         "  def guarded(x) when is_binary(x), do: x\n"
+                         "  def bare when true, do: :ok\n"
+                         "  def twice(x) when is_atom(x) when is_binary(x), do: x\n"
+                         "  def a + b, do: {a, b}\n"
+                         "end\n";
+    const TSLanguage *language = cbm_ts_language(CBM_LANG_ELIXIR);
+    ASSERT_NOT_NULL(language);
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, language));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)strlen(source));
+    ASSERT_NOT_NULL(tree);
+
+    elixir_head_probe_t probe;
+    probe.count = 0;
+    collect_elixir_def_signatures(ts_tree_root_node(tree), source, &probe);
+    ASSERT_EQ(5, probe.count);
+
+    /* Unguarded: nothing to peel, and the head is the whole first argument.
+     * The name node inside it is NOT the head -- the calls walk compares the
+     * node it is visiting, and the `plain` identifier is one of those. */
+    TSNode plain = probe.signature[0];
+    ASSERT_FALSE(cbm_elixir_is_when_guard(plain));
+    ASSERT_TRUE(ts_node_eq(cbm_elixir_def_head_unwrap_guard(plain), plain));
+    ASSERT_TRUE(cbm_elixir_def_head_is(plain, plain));
+    ASSERT_FALSE(cbm_elixir_def_head_is(plain, ts_node_child(plain, 0)));
+
+    /* One guard: the first argument is the operator, the head is its left
+     * operand, and BOTH answer true -- the operator is the node the paren-less
+     * route hands the calls walk, the inner call is the node the peel route
+     * hands it. The guard expression answers false, or the walk would suppress
+     * a real call written inside a guard. */
+    TSNode guarded = probe.signature[1];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(guarded));
+    TSNode guarded_head = cbm_elixir_def_head_unwrap_guard(guarded);
+    ASSERT_FALSE(ts_node_eq(guarded_head, guarded));
+    ASSERT_STR_EQ("call", ts_node_type(guarded_head));
+    ASSERT_TRUE(head_probe_text_is(source, guarded_head, "guarded(x)"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(guarded, guarded));
+    ASSERT_TRUE(cbm_elixir_def_head_is(guarded, guarded_head));
+    TSNode guard_expr = ts_node_child_by_field_name(guarded, TS_FIELD("right"));
+    ASSERT_FALSE(ts_node_is_null(guard_expr));
+    ASSERT_TRUE(head_probe_text_is(source, guard_expr, "is_binary(x)"));
+    ASSERT_FALSE(cbm_elixir_def_head_is(guarded, guard_expr));
+
+    /* Paren-less: the head under the guard is a bare identifier, so there is no
+     * inner call for the peel route to produce. This is the shape that makes
+     * cbm_elixir_def_head_is necessary: the only node the calls walk ever sees
+     * for this clause is the operator. */
+    TSNode bare = probe.signature[2];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(bare));
+    TSNode bare_head = cbm_elixir_def_head_unwrap_guard(bare);
+    ASSERT_STR_EQ("identifier", ts_node_type(bare_head));
+    ASSERT_TRUE(head_probe_text_is(source, bare_head, "bare"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(bare, bare));
+    ASSERT_TRUE(cbm_elixir_def_head_is(bare, bare_head));
+
+    /* Two guards on one clause. tree-sitter-elixir nests them
+     * RIGHT-associatively -- `when(twice(x), when(is_atom(x), is_binary(x)))`,
+     * which is what this asserts -- so the head is still the outer operator's
+     * left operand and the peel reaches it in one step. The repeated peel is
+     * therefore a fixed point rather than a chain walk on this grammar; the
+     * nodes that must answer true are the operator and the head. */
+    TSNode twice = probe.signature[3];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(twice));
+    TSNode second_guard = ts_node_child_by_field_name(twice, TS_FIELD("right"));
+    ASSERT_TRUE(cbm_elixir_is_when_guard(second_guard));
+    TSNode twice_head = cbm_elixir_def_head_unwrap_guard(twice);
+    ASSERT_TRUE(head_probe_text_is(source, twice_head, "twice(x)"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(twice, twice));
+    ASSERT_TRUE(cbm_elixir_def_head_is(twice, twice_head));
+    /* The second guard is a `when` operator too, and it is NOT on the head
+     * chain: a walk that treated any `when` above the head as a declaration
+     * would suppress the calls written inside it. */
+    ASSERT_FALSE(cbm_elixir_def_head_is(twice, second_guard));
+
+    /* An operator definition's head is a binary_operator too, and unwrapping it
+     * would name the function after its own left parameter. Only the `when`
+     * token admits the peel, so `def a + b` is returned unchanged and its left
+     * operand is not a head. */
+    TSNode op_def = probe.signature[4];
+    ASSERT_STR_EQ("binary_operator", ts_node_type(op_def));
+    ASSERT_FALSE(cbm_elixir_is_when_guard(op_def));
+    ASSERT_TRUE(ts_node_eq(cbm_elixir_def_head_unwrap_guard(op_def), op_def));
+    ASSERT_TRUE(cbm_elixir_def_head_is(op_def, op_def));
+    TSNode op_lhs = ts_node_child_by_field_name(op_def, TS_FIELD("left"));
+    ASSERT_TRUE(head_probe_text_is(source, op_lhs, "a"));
+    ASSERT_FALSE(cbm_elixir_def_head_is(op_def, op_lhs));
+
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
     PASS();
 }
 
@@ -8387,6 +8550,7 @@ SUITE(extraction) {
 
     /* Functional */
     RUN_TEST(elixir_function);
+    RUN_TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);
