@@ -1314,6 +1314,54 @@ TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it) {
     PASS();
 }
 
+/* `def name(args) when guard` parses its whole head as a `when`
+ * binary_operator, so the name sits on the operator's left operand rather than
+ * directly under the call. The def extractor accepted only `call` and
+ * `identifier` there, so every guarded clause was dropped -- and a function
+ * whose clauses ALL carry guards never reached the graph at all, silently.
+ * Guards are ordinary Elixir: on one real 2.9k-function codebase this hid 216
+ * of 270 all-guarded functions, and every call edge touching them. */
+TEST(extract_elixir_guarded_def_head) {
+    CBMFileResult *r = extract("defmodule Guarded do\n"
+                               "  def plain(x), do: x\n"
+                               "  def guarded(x) when is_binary(x), do: x\n"
+                               "  def guarded(x) when is_list(x), do: x\n"
+                               "  def multi(x, y) when is_binary(x) and is_integer(y), do: {x, y}\n"
+                               "  defp priv_guarded(x) when is_atom(x), do: x\n"
+                               "  def bare when true, do: :ok\n"
+                               "  def a + b, do: {a, b}\n"
+                               "  def c - d when is_integer(c), do: {c, d}\n"
+                               "  def multi_guard(x) when is_atom(x) when is_binary(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "guarded.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "plain"));
+    ASSERT(has_def(r, "Function", "guarded"));
+    ASSERT(has_def(r, "Function", "multi"));
+    ASSERT(has_def(r, "Function", "priv_guarded"));
+    ASSERT(has_def(r, "Function", "bare"));
+
+    /* Elixir admits more than one guard on a clause. tree-sitter-elixir nests
+     * those `when` operators right-associatively, so the declared head stays
+     * the outermost operator's left operand -- one node either way, and the
+     * peel must not stop short of it or return the guard. */
+    ASSERT(has_def(r, "Function", "multi_guard"));
+    ASSERT_EQ(count_defs_named(r, "Function", "multi_guard"), 1);
+
+    /* An operator definition is a binary_operator head too, but it is not a
+     * guard: unwrapping it names the function after its own LEFT PARAMETER.
+     * `def a + b` must not mint a function called `a`, nor `def c - d when ...`
+     * one called `c` -- the guard's left operand is itself the `c - d`
+     * operator, which names no function either. Neither operator form is
+     * extracted at all, which is what this grammar did before guards were
+     * handled; only the `when` token admits the unwrap. */
+    ASSERT_EQ(count_defs_named(r, "Function", "a"), 0);
+    ASSERT_EQ(count_defs_named(r, "Function", "c"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* tree-sitter-elixir gives a call's arguments node no field name, so the
  * generic `arguments` field lookup returns null and first_string_arg was never
  * populated for any Elixir call — Phoenix route paths, service URLs and config
@@ -8453,6 +8501,7 @@ SUITE(extraction) {
     /* Functional */
     RUN_TEST(elixir_function);
     RUN_TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it);
+    RUN_TEST(extract_elixir_guarded_def_head);
     RUN_TEST(elixir_call_string_argument);
     RUN_TEST(haskell_function);
     RUN_TEST(ocaml_function);

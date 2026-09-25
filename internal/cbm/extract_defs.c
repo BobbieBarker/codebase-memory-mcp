@@ -5268,6 +5268,16 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
         return;
     }
 
+    // `def name(args) when guard` parses the whole head as a `when`
+    // binary_operator, so the name lives on its left operand rather than
+    // directly under the call. Without unwrapping it, every guarded clause is
+    // dropped, and a function whose clauses ALL carry guards never appears in
+    // the graph at all -- silently, since a missing definition is not an error.
+    // The unwrap lives in helpers.c because it peels only `when`: an operator
+    // definition (`def a + b`) is a binary_operator head too, and unwrapping
+    // that one would name the function after its own left parameter.
+    first_arg = cbm_elixir_def_head_unwrap_guard(first_arg);
+
     const char *fk = ts_node_type(first_arg);
     char *name = NULL;
     if (strcmp(fk, "call") == 0 && ts_node_child_count(first_arg) > 0) {
