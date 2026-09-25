@@ -15107,6 +15107,76 @@ TEST(pipeline_objectscript_export_range_join_keeps_one_trailing_marker) {
 }
 #endif
 
+/* End-to-end identity + resolution guard for a source-named container.
+ * Everything below is a measured defect the graph used to carry:
+ *   - fetch/1, fetch/2 and fetch/3 in one module collapsed to ONE node;
+ *   - three `def message/1` in three modules in one file collapsed to one;
+ *   - no Class -> Function containment edge existed at all. */
+TEST(pipeline_elixir_container_and_arity_identity) {
+    char *repo = th_mktempdir("cbm_elixir_identity");
+    ASSERT_NOT_NULL(repo);
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s", repo);
+
+    ASSERT_EQ(th_write_file(TH_PATH(tmpdir, "lib/probe.ex"),
+                            "defmodule Fx.Probe do\n"
+                            "  def get(n), do: n\n"
+                            "end\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmpdir, "lib/store.ex"),
+                            "defmodule Fx.Store do\n"
+                            "  def fetch(a), do: a\n"
+                            "  def fetch(a, b), do: {a, b}\n"
+                            "  def fetch(a, b, c), do: {a, b, c}\n"
+                            "  def run(opts, r) do\n"
+                            "    {Keyword.get(opts, :reason), Fx.Probe.get(r), fetch(1)}\n"
+                            "  end\n"
+                            "end\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmpdir, "lib/errors.ex"),
+                            "defmodule Fx.ErrA do\n"
+                            "  def message(e), do: e\n"
+                            "end\n"
+                            "defmodule Fx.ErrB do\n"
+                            "  def message(e), do: e\n"
+                            "end\n"
+                            "defmodule Fx.ErrC do\n"
+                            "  def message(e), do: e\n"
+                            "end\n"),
+              0);
+
+    char db_path[600];
+    snprintf(db_path, sizeof(db_path), "%s/elixir_identity.db", tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *st = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(st);
+
+    /* Three arities, three nodes. Three modules, three `message` nodes. */
+    cbm_node_t *fetches = NULL;
+    int fetch_count = 0;
+    cbm_store_find_nodes_by_name(st, project, "fetch", &fetches, &fetch_count);
+    ASSERT_EQ(fetch_count, 3);
+    cbm_store_free_nodes(fetches, fetch_count);
+
+    cbm_node_t *messages = NULL;
+    int message_count = 0;
+    cbm_store_find_nodes_by_name(st, project, "message", &messages, &message_count);
+    ASSERT_EQ(message_count, 3);
+    cbm_store_free_nodes(messages, message_count);
+
+    /* Module membership is an edge, not just a QN prefix. */
+    ASSERT_TRUE(cross_file_edge_exists(st, project, "Fx.Store", "fetch", "DEFINES_METHOD"));
+    ASSERT_TRUE(cross_file_edge_exists(st, project, "Fx.ErrB", "message", "DEFINES_METHOD"));
+
+    cbm_store_close(st);
+    cbm_pipeline_free(p);
+    PASS();
+}
+
 SUITE(pipeline) {
     RUN_TEST(pipeline_lsp_surface_persisted_and_body_edit_invariant);
     /* Index lock */
@@ -15154,6 +15224,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_nix_scoped_binding_calls_resolve);
     RUN_TEST(pipeline_hcl_block_reference_resolves_to_its_block);
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
+    RUN_TEST(pipeline_elixir_container_and_arity_identity);
     RUN_TEST(pipeline_objectscript_export_preserves_calls_sequential_parallel);
     RUN_TEST(pipeline_objectscript_export_incremental_matches_full_relationships);
     RUN_TEST(pipeline_objectscript_export_aggregate_exceeds_arena_block_table);
